@@ -1,0 +1,17 @@
+[package]
+name    = "capture"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core              = { path = "../core" }
+game              = { path = "../game" }
+bytes             = { workspace = true }
+crossbeam-channel = { workspace = true }
+tracing           = { workspace = true }
+thiserror         = { workspace = true }
+anyhow            = { workspace = true }
+
+once_cell   = { workspace = true }
+pcap        = "2"
+etherparse  = "0.15"

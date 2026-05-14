@@ -1,0 +1,9 @@
+[package]
+name    = "ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core      = { path = "../core" }
+egui      = { workspace = true }
+egui_plot = { workspace = true }

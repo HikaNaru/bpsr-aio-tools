@@ -1,0 +1,8 @@
+[package]
+name    = "modules-optimizer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core    = { path = "../core" }
+egui    = { workspace = true }

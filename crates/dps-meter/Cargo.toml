@@ -1,0 +1,13 @@
+[package]
+name    = "dps-meter"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core        = { path = "../core" }
+game        = { path = "../game" }
+egui        = { workspace = true }
+serde       = { workspace = true }
+indexmap    = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
