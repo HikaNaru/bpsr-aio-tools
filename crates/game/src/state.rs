@@ -21,15 +21,25 @@ impl GameState {
             }
             GameEvent::LocalPlayer { id } => {
                 self.local_player = Some(*id);
-                if let Some(e) = self.entities.get_mut(id) {
-                    e.is_local = true;
-                }
+                let entity = self.entities.entry(*id).or_insert_with(|| Entity::new(*id));
+                entity.is_local = true;
             }
             GameEvent::ZoneChange { zone_id, zone_name } => {
+                let zone_changed = self.zone_id != Some(*zone_id);
                 self.zone_id   = Some(*zone_id);
                 self.zone_name = Some(zone_name.clone());
+                if zone_changed {
+                    self.entities.clear();
+                }
             }
-            GameEvent::Combat(_) | GameEvent::Unknown { .. } => {}
+            GameEvent::EntityDespawn { id } => {
+                self.entities.remove(id);
+            }
+            GameEvent::EntityStats { id, stats } => {
+                let entity = self.entities.entry(*id).or_insert_with(|| Entity::new(*id));
+                entity.stats.merge(stats);
+            }
+            GameEvent::Combat(_) | GameEvent::PlayerInventory { .. } | GameEvent::Unknown { .. } => {}
         }
     }
 

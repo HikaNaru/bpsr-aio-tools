@@ -1,7 +1,9 @@
+// Blue Protocol packets are NOT encrypted — only Zstd-compressed.
+// Decompression is handled inline in the frame pipeline (proto/mod.rs).
+// This module is kept as a no-op pass-through for structural compatibility.
+
 use bytes::Bytes;
 
-/// Placeholder decryption layer.
-/// TODO: implement once encryption scheme is reverse-engineered.
 pub fn decrypt(data: Bytes) -> Bytes {
     data
 }

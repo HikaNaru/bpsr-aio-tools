@@ -2,6 +2,19 @@ use bytes::Bytes;
 use core::types::{Element, EntityId};
 use std::time::Instant;
 
+use crate::entity::CharStats;
+
+#[derive(Debug, Clone)]
+pub struct PlayerModule {
+    pub effects: Vec<ModuleEffect>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleEffect {
+    pub effect_id: i32,
+    pub level:     i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct CombatEvent {
     pub timestamp: Instant,
@@ -28,6 +41,17 @@ pub enum GameEvent {
     ZoneChange {
         zone_id:   u32,
         zone_name: String,
+    },
+    EntityDespawn {
+        id: EntityId,
+    },
+    PlayerInventory {
+        id:      EntityId,
+        modules: Vec<PlayerModule>,
+    },
+    EntityStats {
+        id:    EntityId,
+        stats: CharStats,
     },
     Unknown {
         opcode:  u32,

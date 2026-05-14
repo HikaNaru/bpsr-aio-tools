@@ -1,5 +1,6 @@
 use crate::encounter::Encounter;
-use game::{GameEvent, GameState};
+use core::types::EntityId;
+use game::GameEvent;
 use std::time::{Duration, Instant};
 
 const MAX_PAST_ENCOUNTERS: usize = 20;
@@ -21,12 +22,14 @@ impl DpsState {
         }
     }
 
-    pub fn apply_event(&mut self, event: &GameEvent, game_state: &GameState) {
+    pub fn apply_event<F>(&mut self, event: &GameEvent, name_resolver: F)
+    where
+        F: Fn(EntityId) -> String,
+    {
         let GameEvent::Combat(combat) = event else {
             return;
         };
 
-        // Start new encounter if none active or timeout elapsed
         let timed_out = self.last_combat
             .map(|t| t.elapsed() > self.encounter_timeout)
             .unwrap_or(false);
@@ -39,7 +42,7 @@ impl DpsState {
         self.last_combat = Some(Instant::now());
 
         if let Some(enc) = &mut self.active {
-            enc.apply(combat, |id| game_state.entity_name(id).to_string());
+            enc.apply(combat, |id| name_resolver(id));
         }
     }
 

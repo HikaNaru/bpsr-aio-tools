@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-core              = { path = "../core" }
+bpsr_core         = { path = "../core", package = "core" }
 game              = { path = "../game" }
 bytes             = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -13,5 +13,7 @@ thiserror         = { workspace = true }
 anyhow            = { workspace = true }
 
 once_cell   = { workspace = true }
+zstd        = { workspace = true }
+prost       = { workspace = true }
 pcap        = "2"
 etherparse  = "0.15"

@@ -3,7 +3,6 @@ use game::event::CombatEvent;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillStat {
     pub skill_id:  u32,
@@ -23,11 +22,6 @@ pub struct PlayerMeter {
     pub skill_breakdown: IndexMap<u32, SkillStat>,
     /// (elapsed_seconds, dps_at_that_second)
     pub dps_timeline:    Vec<(f64, f64)>,
-
-    #[serde(skip)]
-    last_window_damage: u64,
-    #[serde(skip)]
-    window_start: Option<Instant>,
 }
 
 impl PlayerMeter {
@@ -40,8 +34,6 @@ impl PlayerMeter {
             crit_count: 0,
             skill_breakdown: IndexMap::new(),
             dps_timeline: Vec::new(),
-            last_window_damage: 0,
-            window_start: None,
         }
     }
 

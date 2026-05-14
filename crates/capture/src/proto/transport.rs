@@ -1,18 +1,51 @@
 use bytes::Bytes;
-use etherparse::{SlicedPacket, TransportSlice};
+use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 
-/// Strip Ethernet/IP/TCP/UDP headers, return application payload.
-pub fn extract_payload(raw: &[u8]) -> Option<Bytes> {
+pub struct ExtractedPayload {
+    pub data:     Bytes,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub src_ip:   [u8; 4],
+    pub tcp_seq:  u32,
+    pub proto:    &'static str,
+}
+
+pub fn extract_payload(raw: &[u8]) -> Option<ExtractedPayload> {
     let sliced = SlicedPacket::from_ethernet(raw).ok()?;
-    let payload = match sliced.transport? {
-        TransportSlice::Tcp(tcp)   => tcp.payload(),
-        TransportSlice::Udp(udp)   => udp.payload(),
-        TransportSlice::Icmpv4(v4) => v4.payload(),
-        TransportSlice::Icmpv6(v6) => v6.payload(),
+
+    let src_ip = match sliced.net.as_ref()? {
+        NetSlice::Ipv4(ipv4) => ipv4.header().source(),
         _ => return None,
     };
+
+    let (src_port, dst_port, tcp_seq, proto, payload) = match sliced.transport? {
+        TransportSlice::Tcp(tcp) => (
+            tcp.source_port(),
+            tcp.destination_port(),
+            tcp.sequence_number(),
+            "TCP",
+            tcp.payload(),
+        ),
+        TransportSlice::Udp(udp) => (
+            udp.source_port(),
+            udp.destination_port(),
+            0u32,
+            "UDP",
+            udp.payload(),
+        ),
+        _ => return None,
+    };
+
     if payload.is_empty() {
         return None;
     }
-    Some(Bytes::copy_from_slice(payload))
+
+    Some(ExtractedPayload {
+        data: Bytes::copy_from_slice(payload),
+        src_port,
+        dst_port,
+        src_ip,
+        tcp_seq,
+        proto,
+    })
 }

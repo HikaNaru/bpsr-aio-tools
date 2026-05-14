@@ -32,6 +32,9 @@ egui_plot          = "0.29"
 uuid               = { version = "1", features = ["v4", "serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
 once_cell          = { version = "1" }
+zstd               = "0.13"
+prost              = "0.14"
+byteorder          = "1"
 
 [package]
 name        = "bpsr-aio-tools"

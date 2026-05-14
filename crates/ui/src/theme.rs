@@ -1,4 +1,4 @@
-use egui::{Color32, FontDefinitions, Style, Visuals};
+use egui::{Color32, Visuals};
 
 pub const ACCENT:      Color32 = Color32::from_rgb(70, 130, 180);
 pub const DAMAGE_BAR:  Color32 = Color32::from_rgb(70, 130, 180);

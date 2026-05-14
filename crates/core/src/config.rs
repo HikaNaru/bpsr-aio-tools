@@ -3,21 +3,25 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub capture_interface: Option<String>,
-    pub dps_window_secs:   u32,
+    pub dps_window_secs:      u32,
     pub encounter_timeout_secs: u32,
-    pub always_on_top:     bool,
-    pub opacity:           f32,
+    pub always_on_top:        bool,
+    pub opacity:              f32,
+    #[serde(default)]
+    pub lock_position:        bool,
+    #[serde(default)]
+    pub click_passthrough:    bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            capture_interface:      None,
             dps_window_secs:        3,
             encounter_timeout_secs: 30,
             always_on_top:          true,
             opacity:                1.0,
+            lock_position:          false,
+            click_passthrough:      false,
         }
     }
 }
