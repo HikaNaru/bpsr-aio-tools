@@ -12,4 +12,3 @@ anyhow      = { workspace = true }
 
 xcap        = "0.0.14"
 image       = "0.25"
-enigo       = "0.2"
