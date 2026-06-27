@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+fn default_arrow_min_value() -> f32 { 0.40 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FishingConfig {
     // --- Game window ---
@@ -50,6 +52,9 @@ pub struct FishingConfig {
     pub arrow_hue_center:       f32,
     pub arrow_hue_range:        f32,
     pub arrow_min_saturation:   f32,
+    /// Minimum HSV value (brightness 0–1). Gates out dark background pixels. 0 = disabled.
+    #[serde(default = "default_arrow_min_value")]
+    pub arrow_min_value:        f32,
     pub arrow_min_pixels:       u32,
 
     // --- Tension bar (reeling UI) ---
@@ -138,12 +143,14 @@ impl Default for FishingConfig {
             reel_timeout_ms:        30_000,
 
             // Left/right arrow indicators — close to bite detect region [700,350,200,200]
-            left_arrow_region:      [660, 400, 150, 100],
-            right_arrow_region:     [860, 400, 150, 100],
-            arrow_hue_center:       30.0,
-            arrow_hue_range:        25.0,
-            arrow_min_saturation:   0.6,
-            arrow_min_pixels:       20,
+            left_arrow_region:      [630, 400, 180, 100],
+            right_arrow_region:     [820, 400, 180, 100],
+            // Orange arrow: H≈25°, S≈0.88, V≈0.90. Tighter range + V gate avoids background.
+            arrow_hue_center:       25.0,
+            arrow_hue_range:        20.0,
+            arrow_min_saturation:   0.70,
+            arrow_min_value:        0.40,
+            arrow_min_pixels:       25,
 
             tension_bar_region:          [520, 710, 80, 70],
             tension_bar_hue_center:      30.0,
@@ -151,7 +158,7 @@ impl Default for FishingConfig {
             tension_bar_min_saturation:  0.6,
             tension_bar_min_pixels:      30,
 
-            tension_pct_region:          [970, 690, 75, 40],
+            tension_pct_region:          [960, 690, 75, 40],
 
             fish_caught_threshold:  180,
             fish_caught_min_pixels: 500,

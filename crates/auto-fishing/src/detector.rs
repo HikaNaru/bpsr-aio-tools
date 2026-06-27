@@ -355,6 +355,20 @@ fn hue_count_on_image(
     min_sat: f32,
     min_pixels: u32,
 ) -> bool {
+    hue_value_count_on_image(img, region, hue_center, hue_range, min_sat, 0.0, min_pixels)
+}
+
+/// Like `hue_count_on_image` but also gates on a minimum HSV value (brightness).
+/// Pass `min_value = 0.0` to skip the brightness gate (same as `hue_count_on_image`).
+fn hue_value_count_on_image(
+    img: &RgbaImage,
+    region: [i32; 4],
+    hue_center: f32,
+    hue_range: f32,
+    min_sat: f32,
+    min_value: f32,
+    min_pixels: u32,
+) -> bool {
     let [rx, ry, rw, rh] = region;
     let img_w = img.width() as i32;
     let img_h = img.height() as i32;
@@ -368,8 +382,8 @@ fn hue_count_on_image(
     for y in y0..y1 {
         for x in x0..x1 {
             let p = img.get_pixel(x, y);
-            let (h, s, _v) = rgb_to_hsv(p[0], p[1], p[2]);
-            if s >= min_sat && hue_matches(h, hue_center, hue_range) {
+            let (h, s, v) = rgb_to_hsv(p[0], p[1], p[2]);
+            if s >= min_sat && v >= min_value && hue_matches(h, hue_center, hue_range) {
                 count += 1;
                 if count >= min_pixels {
                     return true;
@@ -400,23 +414,25 @@ pub fn detect_bait_position(cfg: &FishingConfig) -> Result<BaitPosition> {
 
 /// Same as `detect_bait_position` but on a pre-captured image.
 pub fn detect_bait_position_on_image(cfg: &FishingConfig, img: &RgbaImage) -> BaitPosition {
-    if hue_count_on_image(
+    if hue_value_count_on_image(
         img,
         resolve_region(cfg.window_origin, cfg.left_arrow_region),
         cfg.arrow_hue_center,
         cfg.arrow_hue_range,
         cfg.arrow_min_saturation,
+        cfg.arrow_min_value,
         cfg.arrow_min_pixels,
     ) {
         return BaitPosition::Left;
     }
 
-    if hue_count_on_image(
+    if hue_value_count_on_image(
         img,
         resolve_region(cfg.window_origin, cfg.right_arrow_region),
         cfg.arrow_hue_center,
         cfg.arrow_hue_range,
         cfg.arrow_min_saturation,
+        cfg.arrow_min_value,
         cfg.arrow_min_pixels,
     ) {
         return BaitPosition::Right;

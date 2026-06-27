@@ -815,6 +815,10 @@ impl Module for FishingModule {
                             ui.add(egui::Slider::new(&mut self.config.arrow_min_saturation, 0.1..=1.0).fixed_decimals(2));
                         });
                         ui.horizontal(|ui| {
+                            ui.label("Min value (brightness):");
+                            ui.add(egui::Slider::new(&mut self.config.arrow_min_value, 0.0..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
                             ui.label("Min pixels:");
                             ui.add(egui::DragValue::new(&mut self.config.arrow_min_pixels).range(1..=500));
                         });
