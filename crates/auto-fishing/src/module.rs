@@ -1,6 +1,6 @@
 use crate::bot::FishingState;
 use crate::config::FishingConfig;
-use crate::detector::{BaitPosition, capture_screen, check_window_focus, detect_bait_position_on_image, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, resolve_region};
+use crate::detector::{BaitPosition, capture_screen, check_window_focus, detect_bait_position_on_image, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, resolve_region};
 use core::module::{Module, ModuleContext};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,8 @@ pub struct FishingModule {
     state:         Arc<Mutex<FishingState>>,
     fish_count:    Arc<AtomicU32>,
     failed_count:  Arc<AtomicU32>,
+    /// Tension bar fill percentage (0–100) updated each reeling frame.
+    tension_pct:   Arc<AtomicU32>,
     bot_thread:    Option<std::thread::JoinHandle<()>>,
     stop_tx:       Option<std::sync::mpsc::Sender<()>>,
     debug_texture:    Option<egui::TextureHandle>,
@@ -42,6 +44,7 @@ fn scale_regions(cfg: &mut FishingConfig, from: (u32, u32), to: (u32, u32)) {
     sr(&mut cfg.left_arrow_region, sx, sy);
     sr(&mut cfg.right_arrow_region, sx, sy);
     sr(&mut cfg.tension_bar_region, sx, sy);
+    sr(&mut cfg.tension_pct_region, sx, sy);
     sr(&mut cfg.fish_caught_region, sx, sy);
 }
 
@@ -68,6 +71,7 @@ impl FishingModule {
             state:         Arc::new(Mutex::new(FishingState::CheckingState)),
             fish_count:    Arc::new(AtomicU32::new(0)),
             failed_count:  Arc::new(AtomicU32::new(0)),
+            tension_pct:   Arc::new(AtomicU32::new(0)),
             bot_thread:    None,
             stop_tx:       None,
             debug_texture:   None,
@@ -108,10 +112,11 @@ impl FishingModule {
         self.session_start = Some(Instant::now());
 
         self.paused.store(false, Ordering::Relaxed);
-        let paused_arc    = Arc::clone(&self.paused);
-        let window_id     = self.game_window_id.clone();
+        let paused_arc       = Arc::clone(&self.paused);
+        let window_id        = self.game_window_id.clone();
         let fish_count_arc   = Arc::clone(&self.fish_count);
         let failed_count_arc = Arc::clone(&self.failed_count);
+        let tension_pct_arc  = Arc::clone(&self.tension_pct);
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let state_arc = Arc::clone(&self.state);
@@ -132,6 +137,8 @@ impl FishingModule {
                 let mut lmb_held = false;
                 let mut held_steer_key: Option<String> = None;
                 let mut bar_absent_streak: u32 = 0;
+                // True while tension is >= 80% and cooling down; resume when < 50%.
+                let mut tension_cooldown = false;
                 'outer: loop {
                     if stop_rx.try_recv().is_ok() {
                         break 'outer;
@@ -275,22 +282,13 @@ impl FishingModule {
                             let elapsed = started_at.elapsed();
                             let timed_out = elapsed > Duration::from_millis(cfg.reel_timeout_ms);
 
-                            if !lmb_held {
-                                eprintln!("[auto-fishing] Entering reeling mode (holding LMB)");
-                                let _ = input.mouse_down();
-                                lmb_held = true;
-                                held_steer_key = None;
-                                bar_absent_streak = 0;
-                            } else {
-                                // Re-assert every iteration — XTest state may not persist on Xwayland.
-                                let _ = input.mouse_down();
-                            }
-
-                            // Hard timeout — release LMB, then fresh capture to check result.
+                            // Hard timeout — release everything, check result.
                             if timed_out {
                                 if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
                                 held_steer_key = None;
                                 if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                tension_cooldown = false;
+                                tension_pct_arc.store(0, Ordering::Relaxed);
                                 eprintln!("[auto-fishing] exit: TIMEOUT at {}ms", elapsed.as_millis());
                                 std::thread::sleep(Duration::from_millis(300));
                                 if detect_fish_caught(&cfg).unwrap_or(false) {
@@ -312,6 +310,38 @@ impl FishingModule {
                                 Err(_) => { std::thread::sleep(Duration::from_millis(50)); continue; }
                             };
 
+                            // Measure and publish tension percentage.
+                            let pct = measure_tension_pct_on_image(&cfg, &screenshot);
+                            tension_pct_arc.store(pct.round() as u32, Ordering::Relaxed);
+                            eprintln!("[auto-fishing] tension: {pct:.0}%");
+
+                            // Tension gate: release at ≥80%, resume at <50%.
+                            if pct >= 80.0 {
+                                if lmb_held {
+                                    let _ = input.mouse_up();
+                                    lmb_held = false;
+                                    tension_cooldown = true;
+                                    eprintln!("[auto-fishing] tension {pct:.0}% >= 80%: releasing LMB");
+                                }
+                            } else if tension_cooldown && pct < 50.0 {
+                                tension_cooldown = false;
+                                eprintln!("[auto-fishing] tension {pct:.0}% < 50%: resuming LMB");
+                            }
+
+                            // LMB management — only hold when not in tension cooldown.
+                            if !tension_cooldown {
+                                if !lmb_held {
+                                    eprintln!("[auto-fishing] holding LMB");
+                                    let _ = input.mouse_down();
+                                    lmb_held = true;
+                                    held_steer_key = None;
+                                    bar_absent_streak = 0;
+                                } else {
+                                    // Re-assert every iteration — XTest state may not persist on Xwayland.
+                                    let _ = input.mouse_down();
+                                }
+                            }
+
                             // Primary exit: fish-caught screen appeared (skip first 1s).
                             if elapsed > Duration::from_millis(1000)
                                 && detect_fish_caught_on_image(&cfg, &screenshot)
@@ -319,6 +349,8 @@ impl FishingModule {
                                 if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
                                 held_steer_key = None;
                                 if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                tension_cooldown = false;
+                                tension_pct_arc.store(0, Ordering::Relaxed);
                                 eprintln!("[auto-fishing] exit: FISH_CAUGHT detected at {}ms", elapsed.as_millis());
                                 *state_arc.lock().unwrap() = FishingState::FishCaught;
                                 continue;
@@ -335,6 +367,8 @@ impl FishingModule {
                                     if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
                                     held_steer_key = None;
                                     if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                    tension_cooldown = false;
+                                    tension_pct_arc.store(0, Ordering::Relaxed);
                                     eprintln!("[auto-fishing] STOPPED: bar_absent_streak={bar_absent_streak} (tension bar absent exit fired — LMB released here)");
                                     std::thread::sleep(Duration::from_millis(300));
                                     if detect_fish_caught(&cfg).unwrap_or(false) {
@@ -352,42 +386,45 @@ impl FishingModule {
                                 bar_absent_streak = 0;
                             }
 
-                            // Steer — XTest targets focused window, check focus first.
+                            // Focus check — pause if window lost focus.
                             if paused_arc.load(Ordering::Relaxed) {
                                 if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
                                 held_steer_key = None;
                                 if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                tension_cooldown = false;
                                 eprintln!("[auto-fishing] exit: PAUSED (focus lost) at {}ms", elapsed.as_millis());
                                 continue;
                             }
-                            // Hold steer key for entire duration arrow is visible.
-                            // On direction change: release old, press new. On Center: release.
-                            let desired: Option<&str> = match detect_bait_position_on_image(&cfg, &screenshot) {
-                                BaitPosition::Left  => Some("a"),
-                                BaitPosition::Right => Some("d"),
-                                BaitPosition::Center => None,
-                            };
-                            match (held_steer_key.as_deref(), desired) {
-                                (Some(cur), Some(want)) if cur == want => {
-                                    // Resend keydown — Wayland XTest state does not persist.
-                                    let _ = input.key_down(cur);
+
+                            // Steer — always active, regardless of tension cooldown.
+                            {
+                                let desired: Option<&str> = match detect_bait_position_on_image(&cfg, &screenshot) {
+                                    BaitPosition::Left   => Some("a"),
+                                    BaitPosition::Right  => Some("d"),
+                                    BaitPosition::Center => None,
+                                };
+                                match (held_steer_key.as_deref(), desired) {
+                                    (Some(cur), Some(want)) if cur == want => {
+                                        // Resend keydown — Wayland XTest state does not persist.
+                                        let _ = input.key_down(cur);
+                                    }
+                                    (Some(cur), Some(want)) => {
+                                        let _ = input.key_up(cur);
+                                        let _ = input.key_down(want);
+                                        eprintln!("[auto-fishing] steer: switch '{cur}' → '{want}'");
+                                        held_steer_key = Some(want.to_string());
+                                    }
+                                    (Some(cur), None) => {
+                                        // Center: keep holding previous key (Wayland resend).
+                                        let _ = input.key_down(cur);
+                                    }
+                                    (None, Some(want)) => {
+                                        let _ = input.key_down(want);
+                                        eprintln!("[auto-fishing] steer: hold '{want}'");
+                                        held_steer_key = Some(want.to_string());
+                                    }
+                                    (None, None) => {}
                                 }
-                                (Some(cur), Some(want)) => {
-                                    let _ = input.key_up(cur);
-                                    let _ = input.key_down(want);
-                                    eprintln!("[auto-fishing] steer: switch '{cur}' → '{want}'");
-                                    held_steer_key = Some(want.to_string());
-                                }
-                                (Some(cur), None) => {
-                                    // Center: keep holding previous key (Wayland resend).
-                                    let _ = input.key_down(cur);
-                                }
-                                (None, Some(want)) => {
-                                    let _ = input.key_down(want);
-                                    eprintln!("[auto-fishing] steer: hold '{want}'");
-                                    held_steer_key = Some(want.to_string());
-                                }
-                                (None, None) => {}
                             }
                             std::thread::sleep(Duration::from_millis(50));
                         }
@@ -487,6 +524,8 @@ fn capture_debug_preview(
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.rod_use_region),    [100, 255, 100, 255]);
     // Tension bar region (cyan)
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.tension_bar_region), [0, 220, 200, 255]);
+    // Tension pct region (teal)
+    draw_rect_border(&mut img, resolve_region(draw_origin, cfg.tension_pct_region), [0, 200, 140, 255]);
     // Continue fishing button region (blue)
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.fish_caught_region), [50, 180, 255, 255]);
     // Left arrow region (magenta)
@@ -556,6 +595,19 @@ impl Module for FishingModule {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
             ui.painter().circle_filled(rect.center(), 4.0, dot_color);
             ui.colored_label(dot_color, state_label);
+
+            let tension = self.tension_pct.load(Ordering::Relaxed);
+            if tension > 0 {
+                ui.separator();
+                let t_color = if tension >= 80 {
+                    theme::BAD
+                } else if tension >= 50 {
+                    theme::WARN
+                } else {
+                    theme::GOOD
+                };
+                ui.colored_label(t_color, format!("Tension: {tension}%"));
+            }
         });
 
         // ── Session stats ────────────────────────────────────────────────
@@ -796,6 +848,10 @@ impl Module for FishingModule {
                         });
                         ui.label("Tension bar region [ox, oy, w, h]:");
                         ui.horizontal(|ui| { for v in &mut self.config.tension_bar_region { dv(v, ui); } });
+                        ui.separator();
+                        ui.strong("Tension percentage");
+                        ui.label("Full fillable bar region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.tension_pct_region { dv(v, ui); } });
                     });
 
                     // Fish Caught
@@ -845,6 +901,7 @@ impl Module for FishingModule {
                 ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "■ Rod use btn");
                 ui.colored_label(egui::Color32::from_rgb(255, 150,   0), "■ Bite");
                 ui.colored_label(egui::Color32::from_rgb(  0, 220, 200), "■ Tension bar");
+                ui.colored_label(egui::Color32::from_rgb(  0, 200, 140), "■ Tension pct");
                 ui.colored_label(egui::Color32::from_rgb( 50, 180, 255), "■ Continue btn");
                 ui.colored_label(egui::Color32::from_rgb(255,  80, 200), "■ Left arrow");
                 ui.colored_label(egui::Color32::from_rgb(255, 160, 220), "■ Right arrow");

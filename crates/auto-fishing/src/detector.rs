@@ -230,6 +230,110 @@ pub fn detect_tension_bar_on_image(cfg: &FishingConfig, img: &RgbaImage) -> bool
     )
 }
 
+/// Read tension percentage (0–100) from a pre-captured image via OCR.
+/// Crops `tension_pct_region`, isolates orange text → white-on-black, pipes PNG to tesseract stdin.
+/// Returns 0.0 on any failure.
+pub fn measure_tension_pct_on_image(cfg: &FishingConfig, img: &RgbaImage) -> f32 {
+    use std::io::Write;
+
+    let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.tension_pct_region);
+    let img_w = img.width() as i32;
+    let img_h = img.height() as i32;
+    let x0 = rx.clamp(0, img_w - 1) as u32;
+    let y0 = ry.clamp(0, img_h - 1) as u32;
+    let x1 = (rx + rw).clamp(0, img_w) as u32;
+    let y1 = (ry + rh).clamp(0, img_h) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+
+    // Preprocess: bright pixels (text) → white, dark (background) → black.
+    // Use brightness threshold — avoids dependency on hue calibration for UI text.
+    let cw = x1 - x0;
+    let ch = y1 - y0;
+    const SCALE: u32 = 3;
+    let mut mono = image::GrayImage::new(cw * SCALE, ch * SCALE);
+    for sy in 0..ch {
+        for sx in 0..cw {
+            let p = img.get_pixel(x0 + sx, y0 + sy);
+            let (_h, _s, v) = rgb_to_hsv(p[0], p[1], p[2]);
+            let val = if v >= 0.55 { 255u8 } else { 0u8 };
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    mono.put_pixel(sx * SCALE + dx, sy * SCALE + dy, image::Luma([val]));
+                }
+            }
+        }
+    }
+
+    // Encode to PNG in memory.
+    let mut png_bytes: Vec<u8> = Vec::new();
+    if mono
+        .write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .is_err()
+    {
+        return 0.0;
+    }
+
+    // Resolve tessdata dir: project-local first, then system fallback.
+    let tessdata_dir = {
+        let local = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("tessdata");
+        if local.join("eng.traineddata").exists() {
+            local
+        } else {
+            std::path::PathBuf::from("/usr/share/tessdata")
+        }
+    };
+
+    // Pipe PNG to tesseract stdin: psm 7 (single line), digits + % whitelist.
+    let mut child = match std::process::Command::new("tesseract")
+        .args(["stdin", "stdout", "--psm", "7", "--oem", "3",
+               "-c", "tessedit_char_whitelist=0123456789%"])
+        .env("TESSDATA_PREFIX", &tessdata_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("[tension-ocr] spawn failed: {e}"); return 0.0; }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&png_bytes);
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => { eprintln!("[tension-ocr] wait failed: {e}"); return 0.0; }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // Anchor on '%': collect digits immediately before it, then strip leading digits
+    // until value fits 0–100 (handles spurious prefix chars like "114%" → "14%").
+    let trimmed = text.trim();
+    let digit_str: String = if let Some(pct) = trimmed.find('%') {
+        trimmed[..pct].chars().filter(|c| c.is_ascii_digit()).collect()
+    } else {
+        trimmed.chars().filter(|c| c.is_ascii_digit()).collect()
+    };
+
+    let mut s = digit_str.as_str();
+    loop {
+        if s.is_empty() { return 0.0; }
+        if let Ok(v) = s.parse::<f32>() {
+            if v <= 100.0 { return v; }
+        }
+        s = &s[1..]; // strip one leading digit and retry
+    }
+}
+
 /// Shared helper: count pixels matching hue/saturation in a region (captures screen internally).
 fn hue_count_region(
     region: [i32; 4],

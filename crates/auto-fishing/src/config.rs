@@ -61,6 +61,11 @@ pub struct FishingConfig {
     /// Min matching pixels to consider bar "present"
     pub tension_bar_min_pixels:      u32,
 
+    // --- Tension percentage (reeling UI) ---
+    /// Region covering the fillable portion of the tension bar (full bar width, left→right).
+    /// Percentage = matching pixels / total pixels × 100.
+    pub tension_pct_region: [i32; 4],
+
     // --- Fish caught detection ---
     /// Per-pixel brightness threshold (0-255) — pixel counts as "bright" if avg(r,g,b) >= this
     pub fish_caught_threshold: u8,
@@ -118,7 +123,7 @@ impl Default for FishingConfig {
             rod_slot_key:               "m".to_string(),
             rod_use_region:             [1355, 485, 150, 55],
 
-            detect_region:       [700, 350, 200, 200],
+            detect_region:       [720, 350, 150, 150],
             bite_hue_center:     30.0,
             bite_hue_range:      25.0,
             bite_min_saturation: 0.6,
@@ -133,18 +138,20 @@ impl Default for FishingConfig {
             reel_timeout_ms:        30_000,
 
             // Left/right arrow indicators — close to bite detect region [700,350,200,200]
-            left_arrow_region:      [740, 480, 200, 120],
-            right_arrow_region:     [980, 480, 200, 120],
+            left_arrow_region:      [660, 400, 150, 100],
+            right_arrow_region:     [860, 400, 150, 100],
             arrow_hue_center:       30.0,
             arrow_hue_range:        25.0,
             arrow_min_saturation:   0.6,
             arrow_min_pixels:       20,
 
-            tension_bar_region:          [620, 820, 100, 72],
+            tension_bar_region:          [520, 710, 80, 70],
             tension_bar_hue_center:      30.0,
             tension_bar_hue_range:       30.0,
             tension_bar_min_saturation:  0.6,
             tension_bar_min_pixels:      30,
+
+            tension_pct_region:          [970, 690, 75, 40],
 
             fish_caught_threshold:  180,
             fish_caught_min_pixels: 500,
