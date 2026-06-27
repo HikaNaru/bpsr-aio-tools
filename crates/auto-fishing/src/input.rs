@@ -20,19 +20,14 @@ impl InputController {
         }
     }
 
-    /// Hold a key for `duration_ms` then release.
-    pub fn hold_key(&mut self, key: &str, duration_ms: u64) -> Result<()> {
-        let id = self.window_id.clone();
-        if id.is_empty() {
-            run(&["keydown", key])?;
-            std::thread::sleep(Duration::from_millis(duration_ms));
-            run(&["keyup", key])?;
-        } else {
-            run(&["keydown", "--window", &id, key])?;
-            std::thread::sleep(Duration::from_millis(duration_ms));
-            run(&["keyup", "--window", &id, key])?;
-        }
-        Ok(())
+    /// Press a key down (does not release). No --clearmodifiers to avoid releasing LMB.
+    pub fn key_down(&mut self, key: &str) -> Result<()> {
+        run(&["keydown", key])
+    }
+
+    /// Release a previously pressed key.
+    pub fn key_up(&mut self, key: &str) -> Result<()> {
+        run(&["keyup", key])
     }
 
     /// Click left mouse button at current cursor position.
@@ -46,6 +41,14 @@ impl InputController {
         std::thread::sleep(Duration::from_millis(duration_ms));
         run(&["mouseup", "1"])?;
         Ok(())
+    }
+
+    pub fn mouse_down(&mut self) -> Result<()> {
+        run(&["mousedown", "1"])
+    }
+
+    pub fn mouse_up(&mut self) -> Result<()> {
+        run(&["mouseup", "1"])
     }
 
     /// Move cursor to absolute screen position then left-click.

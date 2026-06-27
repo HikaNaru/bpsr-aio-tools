@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct CharStats {
     pub level:           Option<u32>,
     pub ability_score:   Option<u32>,
+    pub season_strength: Option<u32>,
     pub hp:              Option<i64>,
     pub max_hp:          Option<i64>,
     pub attack:          Option<i64>,
@@ -23,15 +24,19 @@ pub struct CharStats {
     pub versatility_pct: Option<u32>,
     pub block:           Option<u32>,
     pub block_pct:       Option<u32>,
+    pub atk_speed_pct:  Option<u32>,
+    pub cast_speed_pct: Option<u32>,
+    pub crit_damage:    Option<u32>,
 }
 
 impl CharStats {
     pub fn merge(&mut self, other: &CharStats) {
         macro_rules! m { ($f:ident) => { if other.$f.is_some() { self.$f = other.$f; } }; }
-        m!(level); m!(ability_score); m!(hp); m!(max_hp); m!(attack); m!(strength);
+        m!(level); m!(ability_score); m!(season_strength); m!(hp); m!(max_hp); m!(attack); m!(strength);
         m!(endurance); m!(armor); m!(crit); m!(crit_pct); m!(haste); m!(haste_pct);
         m!(luck); m!(luck_pct); m!(mastery); m!(mastery_pct); m!(versatility);
         m!(versatility_pct); m!(block); m!(block_pct);
+        m!(atk_speed_pct); m!(cast_speed_pct); m!(crit_damage);
     }
 }
 

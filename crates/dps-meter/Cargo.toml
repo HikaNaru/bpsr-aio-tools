@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-core        = { path = "../core" }
-game        = { path = "../game" }
-egui        = { workspace = true }
-serde       = { workspace = true }
-indexmap    = { workspace = true }
-uuid        = { workspace = true }
-chrono      = { workspace = true }
+core              = { path = "../core" }
+game              = { path = "../game" }
+encounter-store   = { path = "../encounter-store" }
+ui                = { path = "../ui" }
+egui              = { workspace = true }
+egui_plot         = { workspace = true }
+serde             = { workspace = true }
+indexmap          = { workspace = true }
+uuid              = { workspace = true }
+chrono            = { workspace = true }
+tracing           = { workspace = true }

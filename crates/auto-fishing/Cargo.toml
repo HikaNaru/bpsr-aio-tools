@@ -5,8 +5,10 @@ edition.workspace = true
 
 [dependencies]
 core        = { path = "../core" }
+ui          = { path = "../ui" }
 egui        = { workspace = true }
 serde       = { workspace = true }
+serde_json  = { workspace = true }
 tracing     = { workspace = true }
 anyhow      = { workspace = true }
 

@@ -1,0 +1,11 @@
+[package]
+name    = "cooldown-tracker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core    = { path = "../core" }
+game    = { path = "../game" }
+egui    = { workspace = true }
+serde   = { workspace = true }
+tracing = { workspace = true }

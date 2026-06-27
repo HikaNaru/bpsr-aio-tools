@@ -4,6 +4,8 @@ pub mod framing;
 pub mod crypto;
 pub mod opcode;
 pub mod packets;
+pub mod service_ids;
+pub mod method_ids;
 
 use crate::{debug_stats, RawPacket};
 use crossbeam_channel::{Receiver, Sender};
@@ -138,6 +140,12 @@ fn format_event(event: &GameEvent) -> String {
                 c.source_id.0, c.target_id.0, c.damage, c.is_crit
             )
         }
+        GameEvent::Heal(c) => {
+            format!(
+                "[Heal] src={:#x} → tgt={:#x}  heal={}  crit={}",
+                c.source_id.0, c.target_id.0, c.damage, c.is_crit
+            )
+        }
         GameEvent::LocalPlayer { id } => {
             format!("[LocalPlayer] id={:#x}", id.0)
         }
@@ -155,6 +163,18 @@ fn format_event(event: &GameEvent) -> String {
                 "[EntityStats] id={:#x} lv={:?} hp={:?}/{:?} atk={:?} gs={:?}",
                 id.0, stats.level, stats.hp, stats.max_hp, stats.attack, stats.ability_score
             )
+        }
+        GameEvent::DungeonState { state } => {
+            format!("[DungeonState] state={state:?}")
+        }
+        GameEvent::Chat { channel, sender_name, text, .. } => {
+            format!("[Chat] ch={channel:?} from={sender_name:?} text={text:?}")
+        }
+        GameEvent::MatchmakingAlert { kind } => {
+            format!("[MatchmakingAlert] kind={kind:?}")
+        }
+        GameEvent::ThreatUpdate { target_id, entity_id, threat } => {
+            format!("[ThreatUpdate] target={target_id:?} entity={entity_id:?} threat={threat}")
         }
         GameEvent::Unknown { opcode, .. } => {
             format!("[Unknown] opcode={opcode:#010x}")

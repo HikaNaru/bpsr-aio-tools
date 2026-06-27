@@ -218,6 +218,18 @@ pub fn detect_tension_bar(cfg: &FishingConfig) -> Result<bool> {
     )
 }
 
+/// Same as `detect_tension_bar` but on a pre-captured image.
+pub fn detect_tension_bar_on_image(cfg: &FishingConfig, img: &RgbaImage) -> bool {
+    hue_count_on_image(
+        img,
+        resolve_region(cfg.window_origin, cfg.tension_bar_region),
+        cfg.tension_bar_hue_center,
+        cfg.tension_bar_hue_range,
+        cfg.tension_bar_min_saturation,
+        cfg.tension_bar_min_pixels,
+    )
+}
+
 /// Shared helper: count pixels matching hue/saturation in a region (captures screen internally).
 fn hue_count_region(
     region: [i32; 4],
@@ -275,47 +287,38 @@ pub fn detect_bite(cfg: &FishingConfig) -> Result<bool> {
     )
 }
 
-/// Scan `lure_region` for pixels matching the lure's hue (HSV-based, lighting-invariant).
-/// Average the X positions of matching pixels → classify Left / Center / Right.
-/// Returns Center when no matching pixels found (lure not visible).
+/// Check each directional arrow region for the steering indicator color.
+/// Left arrow visible → Left; right arrow visible → Right; neither → Center.
 pub fn detect_bait_position(cfg: &FishingConfig) -> Result<BaitPosition> {
-    let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.lure_region);
-    let screenshot = capture_screen().unwrap_or_else(|_| RgbaImage::new(1, 1));
-    let img_w = screenshot.width() as i32;
-    let img_h = screenshot.height() as i32;
+    let screenshot = capture_screen()?;
+    Ok(detect_bait_position_on_image(cfg, &screenshot))
+}
 
-    let x0 = rx.clamp(0, img_w - 1) as u32;
-    let y0 = ry.clamp(0, img_h - 1) as u32;
-    let x1 = (rx + rw).clamp(0, img_w) as u32;
-    let y1 = (ry + rh).clamp(0, img_h) as u32;
-
-    let mut sum_x: u64 = 0;
-    let mut count: u64 = 0;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let p = screenshot.get_pixel(x, y);
-            let (h, s, _v) = rgb_to_hsv(p[0], p[1], p[2]);
-            if s >= cfg.lure_min_saturation && hue_matches(h, cfg.lure_hue_center, cfg.lure_hue_range) {
-                sum_x += x as u64;
-                count += 1;
-            }
-        }
+/// Same as `detect_bait_position` but on a pre-captured image.
+pub fn detect_bait_position_on_image(cfg: &FishingConfig, img: &RgbaImage) -> BaitPosition {
+    if hue_count_on_image(
+        img,
+        resolve_region(cfg.window_origin, cfg.left_arrow_region),
+        cfg.arrow_hue_center,
+        cfg.arrow_hue_range,
+        cfg.arrow_min_saturation,
+        cfg.arrow_min_pixels,
+    ) {
+        return BaitPosition::Left;
     }
 
-    if count == 0 {
-        return Ok(BaitPosition::Center);
+    if hue_count_on_image(
+        img,
+        resolve_region(cfg.window_origin, cfg.right_arrow_region),
+        cfg.arrow_hue_center,
+        cfg.arrow_hue_range,
+        cfg.arrow_min_saturation,
+        cfg.arrow_min_pixels,
+    ) {
+        return BaitPosition::Right;
     }
 
-    let lure_x = (sum_x / count) as i32;
-    let margin  = (rw as f32 * cfg.bait_center_margin_pct) as i32;
-    let center_x = rx + rw / 2;
-    if lure_x < center_x - margin {
-        Ok(BaitPosition::Left)
-    } else if lure_x > center_x + margin {
-        Ok(BaitPosition::Right)
-    } else {
-        Ok(BaitPosition::Center)
-    }
+    BaitPosition::Center
 }
 
 /// Detect if the fish-caught result screen is showing.
@@ -324,10 +327,14 @@ pub fn detect_bait_position(cfg: &FishingConfig) -> Result<BaitPosition> {
 ///   2. Orange back button gone (fishing mode UI replaced by result screen)
 pub fn detect_fish_caught(cfg: &FishingConfig) -> Result<bool> {
     let screenshot = capture_screen()?;
+    Ok(detect_fish_caught_on_image(cfg, &screenshot))
+}
+
+/// Same as `detect_fish_caught` but on a pre-captured image.
+pub fn detect_fish_caught_on_image(cfg: &FishingConfig, screenshot: &RgbaImage) -> bool {
     let img_w = screenshot.width() as i32;
     let img_h = screenshot.height() as i32;
 
-    // Condition 1: enough bright pixels in the continue button region
     let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
     let x0 = rx.clamp(0, img_w - 1) as u32;
     let y0 = ry.clamp(0, img_h - 1) as u32;
@@ -335,7 +342,7 @@ pub fn detect_fish_caught(cfg: &FishingConfig) -> Result<bool> {
     let y1 = (ry + rh).clamp(0, img_h) as u32;
 
     if x1 <= x0 || y1 <= y0 {
-        return Ok(false);
+        return false;
     }
 
     let mut bright: u32 = 0;
@@ -354,19 +361,18 @@ pub fn detect_fish_caught(cfg: &FishingConfig) -> Result<bool> {
         }
     }
     if bright < cfg.fish_caught_min_pixels {
-        return Ok(false);
+        return false;
     }
 
-    // Condition 2: orange back button absent → result screen replaced fishing UI
     let orange_visible = hue_count_on_image(
-        &screenshot,
+        screenshot,
         resolve_region(cfg.window_origin, cfg.fishing_mode_region),
         cfg.fishing_mode_hue_center,
         cfg.fishing_mode_hue_range,
         cfg.fishing_mode_min_saturation,
         cfg.fishing_mode_min_pixels,
     );
-    Ok(!orange_visible)
+    !orange_visible
 }
 
 /// Convert RGB (0–255) to HSV (h: 0–360, s: 0–1, v: 0–1).

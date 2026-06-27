@@ -43,11 +43,14 @@ pub struct FishingConfig {
     pub reel_pause_ms:          u64,
     /// Max time to spend reeling before giving up (fish escaped / stuck)
     pub reel_timeout_ms:        u64,
-    pub lure_region:            [i32; 4],
-    pub lure_hue_center:        f32,
-    pub lure_hue_range:         f32,
-    pub lure_min_saturation:    f32,
-    pub bait_center_margin_pct: f32,
+
+    // --- Arrow indicators (steer left / steer right during reeling) ---
+    pub left_arrow_region:      [i32; 4],
+    pub right_arrow_region:     [i32; 4],
+    pub arrow_hue_center:       f32,
+    pub arrow_hue_range:        f32,
+    pub arrow_min_saturation:   f32,
+    pub arrow_min_pixels:       u32,
 
     // --- Tension bar (reeling UI) ---
     /// Region covering the tension bar. Presence = still reeling; absence = fish escaped.
@@ -65,6 +68,31 @@ pub struct FishingConfig {
     pub fish_caught_min_pixels: u32,
     /// Screen region [ox,oy,w,h] of the "Continue fishing" button (used for both detect + click)
     pub fish_caught_region: [i32; 4],
+}
+
+impl FishingConfig {
+    pub fn config_path() -> std::path::PathBuf {
+        let mut p = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        p.push("config");
+        p.push("fishing.json");
+        p
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let path = Self::config_path();
+        if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 impl Default for FishingConfig {
@@ -103,13 +131,16 @@ impl Default for FishingConfig {
             reel_hold_ms:           400,
             reel_pause_ms:          300,
             reel_timeout_ms:        30_000,
-            lure_region:            [0, 0, 1600, 900],
-            lure_hue_center:        15.0,
-            lure_hue_range:         20.0,
-            lure_min_saturation:    0.5,
-            bait_center_margin_pct: 0.25,
 
-            tension_bar_region:          [350, 800, 900, 60],
+            // Left/right arrow indicators — close to bite detect region [700,350,200,200]
+            left_arrow_region:      [740, 480, 200, 120],
+            right_arrow_region:     [980, 480, 200, 120],
+            arrow_hue_center:       30.0,
+            arrow_hue_range:        25.0,
+            arrow_min_saturation:   0.6,
+            arrow_min_pixels:       20,
+
+            tension_bar_region:          [620, 820, 100, 72],
             tension_bar_hue_center:      30.0,
             tension_bar_hue_range:       30.0,
             tension_bar_min_saturation:  0.6,

@@ -6,7 +6,12 @@ members = [
     "crates/dps-meter",
     "crates/auto-fishing",
     "crates/modules-optimizer",
+    "crates/encounter-store",
+    "crates/chat",
+    "crates/cooldown-tracker",
     "crates/ui",
+    "crates/bptimer",
+    "crates/threat-meter",
 ]
 resolver = "2"
 
@@ -35,6 +40,10 @@ once_cell          = { version = "1" }
 zstd               = "0.13"
 prost              = "0.14"
 byteorder          = "1"
+rodio              = { version = "0.17", default-features = false }
+image              = { version = "0.25", default-features = false, features = ["png"] }
+reqwest            = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tungstenite        = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [package]
 name        = "bpsr-aio-tools"
@@ -60,7 +69,14 @@ game               = { path = "crates/game" }
 dps-meter          = { path = "crates/dps-meter" }
 auto-fishing       = { path = "crates/auto-fishing" }
 modules-optimizer  = { path = "crates/modules-optimizer" }
+encounter-store    = { path = "crates/encounter-store" }
+chat               = { path = "crates/chat" }
+cooldown-tracker   = { path = "crates/cooldown-tracker" }
+bptimer            = { path = "crates/bptimer" }
+threat-meter       = { path = "crates/threat-meter" }
 ui                 = { path = "crates/ui" }
+rodio              = { workspace = true }
+image              = { workspace = true }
 
 [profile.release]
 opt-level       = 3

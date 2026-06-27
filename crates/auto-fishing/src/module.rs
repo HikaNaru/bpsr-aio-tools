@@ -1,10 +1,11 @@
 use crate::bot::FishingState;
 use crate::config::FishingConfig;
-use crate::detector::{BaitPosition, check_window_focus, detect_fish_caught, detect_fishing_mode, detect_fishing_rod, detect_tension_bar, find_game_window, focus_game_window, resolve_region};
+use crate::detector::{BaitPosition, capture_screen, check_window_focus, detect_bait_position_on_image, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, resolve_region};
 use core::module::{Module, ModuleContext};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use ui::theme;
 
 pub struct FishingModule {
     config:        FishingConfig,
@@ -20,6 +21,7 @@ pub struct FishingModule {
     game_window_id:   String,
     paused:           Arc<AtomicBool>,
     last_window_size: (u32, u32),
+    session_start:    Option<Instant>,
 }
 
 /// Scale all position/region offsets from one game content resolution to another.
@@ -37,14 +39,15 @@ fn scale_regions(cfg: &mut FishingConfig, from: (u32, u32), to: (u32, u32)) {
     sr(&mut cfg.fishing_rod_region, sx, sy);
     sr(&mut cfg.rod_use_region, sx, sy);
     sr(&mut cfg.detect_region, sx, sy);
-    sr(&mut cfg.lure_region, sx, sy);
+    sr(&mut cfg.left_arrow_region, sx, sy);
+    sr(&mut cfg.right_arrow_region, sx, sy);
     sr(&mut cfg.tension_bar_region, sx, sy);
     sr(&mut cfg.fish_caught_region, sx, sy);
 }
 
 impl FishingModule {
     pub fn new() -> Self {
-        let mut config = FishingConfig::default();
+        let mut config = FishingConfig::load();
         const BASE: (u32, u32) = (1600, 900);
         let mut game_window_id = String::new();
         let mut detected_window = None;
@@ -73,6 +76,7 @@ impl FishingModule {
             game_window_id,
             paused:          Arc::new(AtomicBool::new(false)),
             last_window_size,
+            session_start:   None,
         }
     }
 
@@ -99,6 +103,10 @@ impl FishingModule {
     fn start_bot(&mut self) {
         self.focus_game();
 
+        self.fish_count.store(0, Ordering::Relaxed);
+        self.failed_count.store(0, Ordering::Relaxed);
+        self.session_start = Some(Instant::now());
+
         self.paused.store(false, Ordering::Relaxed);
         let paused_arc    = Arc::clone(&self.paused);
         let window_id     = self.game_window_id.clone();
@@ -121,18 +129,28 @@ impl FishingModule {
                 };
 
                 let mut focus_tick = 0u32;
+                let mut lmb_held = false;
+                let mut held_steer_key: Option<String> = None;
+                let mut bar_absent_streak: u32 = 0;
                 'outer: loop {
                     if stop_rx.try_recv().is_ok() {
                         break 'outer;
                     }
 
                     focus_tick += 1;
-                    if focus_tick >= 30 {
+                    if focus_tick >= 5 {
                         focus_tick = 0;
                         paused_arc.store(!check_window_focus(&window_id), Ordering::Relaxed);
                     }
 
                     if paused_arc.load(Ordering::Relaxed) {
+                        if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                        held_steer_key = None;
+                        if lmb_held {
+                            eprintln!("[auto-fishing] OUTER PAUSED: releasing LMB (focus lost, window_id='{window_id}')");
+                            let _ = input.mouse_up();
+                            lmb_held = false;
+                        }
                         std::thread::sleep(Duration::from_millis(200));
                         continue;
                     }
@@ -145,6 +163,19 @@ impl FishingModule {
                                 cfg.window_origin = (wx, wy);
                             }
                             std::thread::sleep(Duration::from_millis(300));
+
+                            // Fish caught screen may still be visible after CPU-spike delay.
+                            // Click continue again and wait longer before re-checking.
+                            if detect_fish_caught(&cfg).unwrap_or(false) {
+                                eprintln!("[auto-fishing] CheckingState: fish caught screen still visible, retrying continue click");
+                                let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
+                                let _ = input.click_at(rx + rw / 2, ry + rh / 2);
+                                *state_arc.lock().unwrap() = FishingState::Cooldown {
+                                    until: Instant::now() + Duration::from_millis(2000),
+                                };
+                                continue;
+                            }
+
                             let in_mode = detect_fishing_mode(&cfg).unwrap_or(false);
                             if !in_mode {
                                 *state_arc.lock().unwrap() = FishingState::EnteringFishingMode;
@@ -155,6 +186,7 @@ impl FishingModule {
                             }
                         }
                         FishingState::EnteringFishingMode => {
+                            eprintln!("[auto-fishing] Entering fishing mode (pressing '{}')", cfg.fishing_key);
                             let _ = input.press_key(&cfg.fishing_key);
                             // Poll up to 10s for fishing mode confirmation.
                             // On timeout → CheckingState (retry F press).
@@ -184,8 +216,10 @@ impl FishingModule {
                             }
                         }
                         FishingState::SelectingRod => {
+                            eprintln!("[auto-fishing] Checking rod (no rod equipped, opening equipment)");
                             let _ = input.press_key(&cfg.rod_slot_key);
                             std::thread::sleep(Duration::from_millis(800));
+                            eprintln!("[auto-fishing] Using rod");
                             let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.rod_use_region);
                             let _ = input.click_at(rx + rw / 2, ry + rh / 2);
                             std::thread::sleep(Duration::from_millis(500));
@@ -195,11 +229,26 @@ impl FishingModule {
                             *state_arc.lock().unwrap() = FishingState::Idle;
                         }
                         FishingState::Idle => {
+                            eprintln!("[auto-fishing] Casting");
                             let _ = input.click_mouse_left();
                             *state_arc.lock().unwrap() = FishingState::Casting;
                         }
                         FishingState::Casting => {
-                            std::thread::sleep(Duration::from_millis(cfg.cast_delay_ms));
+                            // Poll for rod UI to disappear — signals line is in water.
+                            // cast_delay_ms is the max wait before assuming cast succeeded.
+                            let deadline = Instant::now() + Duration::from_millis(cfg.cast_delay_ms);
+                            loop {
+                                std::thread::sleep(Duration::from_millis(100));
+                                if stop_rx.try_recv().is_ok() { break 'outer; }
+                                // Rod UI absent = cast successful, line in water
+                                if !detect_fishing_rod(&cfg).unwrap_or(true) {
+                                    break;
+                                }
+                                if Instant::now() >= deadline {
+                                    break;
+                                }
+                            }
+                            eprintln!("[auto-fishing] Waiting for bite");
                             *state_arc.lock().unwrap() =
                                 FishingState::WaitingBite { cast_at: Instant::now() };
                         }
@@ -223,16 +272,31 @@ impl FishingModule {
                             }
                         }
                         FishingState::Reeling { started_at } => {
-                            let timed_out = started_at.elapsed()
-                                > Duration::from_millis(cfg.reel_timeout_ms);
-                            let bar_present = detect_tension_bar(&cfg).unwrap_or(true);
+                            let elapsed = started_at.elapsed();
+                            let timed_out = elapsed > Duration::from_millis(cfg.reel_timeout_ms);
 
-                            if !bar_present || timed_out {
-                                // Tension bar gone or timeout — determine outcome
+                            if !lmb_held {
+                                eprintln!("[auto-fishing] Entering reeling mode (holding LMB)");
+                                let _ = input.mouse_down();
+                                lmb_held = true;
+                                held_steer_key = None;
+                                bar_absent_streak = 0;
+                            } else {
+                                // Re-assert every iteration — XTest state may not persist on Xwayland.
+                                let _ = input.mouse_down();
+                            }
+
+                            // Hard timeout — release LMB, then fresh capture to check result.
+                            if timed_out {
+                                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                                held_steer_key = None;
+                                if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                eprintln!("[auto-fishing] exit: TIMEOUT at {}ms", elapsed.as_millis());
                                 std::thread::sleep(Duration::from_millis(300));
                                 if detect_fish_caught(&cfg).unwrap_or(false) {
                                     *state_arc.lock().unwrap() = FishingState::FishCaught;
                                 } else {
+                                    eprintln!("[auto-fishing] Fish escaped (timeout)");
                                     failed_count_arc.fetch_add(1, Ordering::Relaxed);
                                     *state_arc.lock().unwrap() = FishingState::Cooldown {
                                         until: Instant::now() + Duration::from_millis(cfg.cooldown_ms),
@@ -241,18 +305,94 @@ impl FishingModule {
                                 continue;
                             }
 
-                            // Bar present — steer + hold LMB
-                            match crate::detector::detect_bait_position(&cfg)
-                                .unwrap_or(BaitPosition::Center)
+                            // One screenshot covers all checks this iteration — arrow indicator
+                            // is visible for only ~1s; separate captures would miss it.
+                            let screenshot = match capture_screen() {
+                                Ok(s) => s,
+                                Err(_) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+                            };
+
+                            // Primary exit: fish-caught screen appeared (skip first 1s).
+                            if elapsed > Duration::from_millis(1000)
+                                && detect_fish_caught_on_image(&cfg, &screenshot)
                             {
-                                BaitPosition::Left  => { let _ = input.hold_key("a", 80); }
-                                BaitPosition::Right => { let _ = input.hold_key("d", 80); }
-                                BaitPosition::Center => {}
+                                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                                held_steer_key = None;
+                                if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                eprintln!("[auto-fishing] exit: FISH_CAUGHT detected at {}ms", elapsed.as_millis());
+                                *state_arc.lock().unwrap() = FishingState::FishCaught;
+                                continue;
                             }
-                            let _ = input.hold_mouse_left(cfg.reel_hold_ms);
-                            std::thread::sleep(Duration::from_millis(cfg.reel_pause_ms));
+
+                            // Secondary exit: tension bar absent 10+ reads after 2s grace.
+                            if elapsed > Duration::from_millis(2000) {
+                                if !detect_tension_bar_on_image(&cfg, &screenshot) {
+                                    bar_absent_streak += 1;
+                                } else {
+                                    bar_absent_streak = 0;
+                                }
+                                if bar_absent_streak >= 10 {
+                                    if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                                    held_steer_key = None;
+                                    if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                    eprintln!("[auto-fishing] STOPPED: bar_absent_streak={bar_absent_streak} (tension bar absent exit fired — LMB released here)");
+                                    std::thread::sleep(Duration::from_millis(300));
+                                    if detect_fish_caught(&cfg).unwrap_or(false) {
+                                        *state_arc.lock().unwrap() = FishingState::FishCaught;
+                                    } else {
+                                        eprintln!("[auto-fishing] Fish escaped (tension bar absent)");
+                                        failed_count_arc.fetch_add(1, Ordering::Relaxed);
+                                        *state_arc.lock().unwrap() = FishingState::Cooldown {
+                                            until: Instant::now() + Duration::from_millis(cfg.cooldown_ms),
+                                        };
+                                    }
+                                    continue;
+                                }
+                            } else {
+                                bar_absent_streak = 0;
+                            }
+
+                            // Steer — XTest targets focused window, check focus first.
+                            if paused_arc.load(Ordering::Relaxed) {
+                                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                                held_steer_key = None;
+                                if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                eprintln!("[auto-fishing] exit: PAUSED (focus lost) at {}ms", elapsed.as_millis());
+                                continue;
+                            }
+                            // Hold steer key for entire duration arrow is visible.
+                            // On direction change: release old, press new. On Center: release.
+                            let desired: Option<&str> = match detect_bait_position_on_image(&cfg, &screenshot) {
+                                BaitPosition::Left  => Some("a"),
+                                BaitPosition::Right => Some("d"),
+                                BaitPosition::Center => None,
+                            };
+                            match (held_steer_key.as_deref(), desired) {
+                                (Some(cur), Some(want)) if cur == want => {
+                                    // Resend keydown — Wayland XTest state does not persist.
+                                    let _ = input.key_down(cur);
+                                }
+                                (Some(cur), Some(want)) => {
+                                    let _ = input.key_up(cur);
+                                    let _ = input.key_down(want);
+                                    eprintln!("[auto-fishing] steer: switch '{cur}' → '{want}'");
+                                    held_steer_key = Some(want.to_string());
+                                }
+                                (Some(cur), None) => {
+                                    // Center: keep holding previous key (Wayland resend).
+                                    let _ = input.key_down(cur);
+                                }
+                                (None, Some(want)) => {
+                                    let _ = input.key_down(want);
+                                    eprintln!("[auto-fishing] steer: hold '{want}'");
+                                    held_steer_key = Some(want.to_string());
+                                }
+                                (None, None) => {}
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
                         }
                         FishingState::FishCaught => {
+                            eprintln!("[auto-fishing] Fish caught! Clicking continue");
                             fish_count_arc.fetch_add(1, Ordering::Relaxed);
                             std::thread::sleep(Duration::from_millis(500));
                             let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
@@ -264,12 +404,17 @@ impl FishingModule {
                         FishingState::Cooldown { until } => {
                             let remaining = until.duration_since(Instant::now());
                             if remaining.is_zero() {
-                                *state_arc.lock().unwrap() = FishingState::Idle;
+                                // Recheck rod after each fish escape/catch before next cast
+                                *state_arc.lock().unwrap() = FishingState::CheckingState;
                             } else {
                                 std::thread::sleep(remaining.min(Duration::from_millis(50)));
                             }
                         }
                     }
+                }
+                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                if lmb_held {
+                    let _ = input.mouse_up();
                 }
                 *state_arc.lock().unwrap() = FishingState::CheckingState;
             })
@@ -344,6 +489,10 @@ fn capture_debug_preview(
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.tension_bar_region), [0, 220, 200, 255]);
     // Continue fishing button region (blue)
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.fish_caught_region), [50, 180, 255, 255]);
+    // Left arrow region (magenta)
+    draw_rect_border(&mut img, resolve_region(draw_origin, cfg.left_arrow_region),  [255, 80, 200, 255]);
+    // Right arrow region (pink)
+    draw_rect_border(&mut img, resolve_region(draw_origin, cfg.right_arrow_region), [255, 160, 220, 255]);
 
     let save_path = {
         let mut p = std::env::current_dir()
@@ -370,6 +519,15 @@ fn capture_debug_preview(
     Ok(ctx.load_texture("debug-preview", color_image, egui::TextureOptions::default()))
 }
 
+fn state_color(state: &FishingState) -> egui::Color32 {
+    match state {
+        FishingState::Idle | FishingState::FishCaught         => theme::GOOD,
+        FishingState::WaitingBite { .. } | FishingState::Reeling { .. } => theme::ACCENT2,
+        FishingState::Cooldown { .. }                          => theme::WARN,
+        _                                                      => theme::ACCENT,
+    }
+}
+
 impl Module for FishingModule {
     fn id(&self)   -> &'static str { "auto-fishing" }
     fn name(&self) -> &str         { "Auto Fishing" }
@@ -381,29 +539,59 @@ impl Module for FishingModule {
     fn on_disable(&mut self) { self.stop_bot(); }
 
     fn ui(&mut self, ui: &mut egui::Ui, _egui_ctx: &egui::Context) {
-        let state_label = self.state.lock().unwrap().label();
+        let paused      = self.paused.load(Ordering::Relaxed);
+        let state_guard = self.state.lock().unwrap();
+        let (dot_color, state_label) = if self.enabled && paused {
+            (theme::BAD, "Paused (game not focused)")
+        } else {
+            (state_color(&state_guard), state_guard.label())
+        };
+        drop(state_guard);
 
         ui.heading("Auto Fishing");
         ui.separator();
 
+        // ── Status dot + label ───────────────────────────────────────────
         ui.horizontal(|ui| {
-            ui.label("Status:");
-            let paused = self.paused.load(Ordering::Relaxed);
-            if self.enabled && paused {
-                ui.strong("Paused (game not focused)");
-            } else {
-                ui.strong(state_label);
-            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+            ui.colored_label(dot_color, state_label);
         });
+
+        // ── Session stats ────────────────────────────────────────────────
         ui.horizontal(|ui| {
-            ui.label(format!("Caught: {}", self.fish_count.load(Ordering::Relaxed)));
-            ui.separator();
-            ui.label(format!("Failed: {}", self.failed_count.load(Ordering::Relaxed)));
+            let caught = self.fish_count.load(Ordering::Relaxed);
+            let failed = self.failed_count.load(Ordering::Relaxed);
+            ui.colored_label(theme::GOOD, format!("Caught: {caught}"));
+            ui.colored_label(theme::BAD,  format!("Failed: {failed}"));
+            if ui.small_button("Reset").clicked() {
+                self.fish_count.store(0, Ordering::Relaxed);
+                self.failed_count.store(0, Ordering::Relaxed);
+                self.session_start = None;
+            }
+            if let Some(start) = self.session_start {
+                let secs  = start.elapsed().as_secs();
+                let h     = secs / 3600;
+                let m     = (secs % 3600) / 60;
+                let s     = secs % 60;
+                ui.separator();
+                ui.colored_label(theme::TEXT_MUTED, format!("{h:02}:{m:02}:{s:02}"));
+                if secs > 30 {
+                    let rate = caught as f64 / (secs as f64 / 3600.0);
+                    ui.colored_label(theme::TEXT_MUTED, format!("{rate:.1}/hr"));
+                }
+                let total = caught + failed;
+                if total > 0 {
+                    let pct = caught as f64 / total as f64 * 100.0;
+                    let col = if pct >= 80.0 { theme::GOOD } else if pct >= 50.0 { theme::WARN } else { theme::BAD };
+                    ui.colored_label(col, format!("{pct:.0}%"));
+                }
+            }
         });
 
         ui.separator();
 
-        let paused = self.paused.load(Ordering::Relaxed);
+        // ── Controls ─────────────────────────────────────────────────────
         if self.enabled && paused {
             ui.horizontal(|ui| {
                 if ui.button("▶ Resume").clicked() {
@@ -425,171 +613,224 @@ impl Module for FishingModule {
             self.on_enable();
         }
 
-        // ── Settings (detection params, timing, hue) ────────────────────
+        // ── Settings ─────────────────────────────────────────────────────
         ui.separator();
         ui.collapsing("Settings", |ui| {
             egui::ScrollArea::vertical()
                 .max_height(400.0)
                 .id_salt("fishing_settings_scroll")
                 .show(ui, |ui| {
-                    ui.strong("Game window");
-                    ui.horizontal(|ui| {
-                        ui.label("Window title:");
-                        ui.text_edit_singleline(&mut self.config.game_window_title);
+
+                    // Game Window & Hotkeys
+                    ui.collapsing("Game Window & Hotkeys", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Window title:");
+                            ui.text_edit_singleline(&mut self.config.game_window_title);
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Detect window").clicked() {
+                                if let Some((id, wx, wy, ww, wh)) =
+                                    find_game_window(&self.config.game_window_title)
+                                {
+                                    self.apply_window_detection(id, wx, wy, ww, wh);
+                                }
+                            }
+                            match self.detected_window {
+                                Some((x, y, w, h)) => { ui.label(format!("({x},{y}) {w}×{h}")); }
+                                None               => { ui.label("not detected"); }
+                            }
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Enter fishing mode:");
+                            ui.add(egui::TextEdit::singleline(&mut self.config.fishing_key).desired_width(40.0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Open rod equipment:");
+                            ui.add(egui::TextEdit::singleline(&mut self.config.rod_slot_key).desired_width(40.0));
+                        });
                     });
+
+                    // Fishing Mode Entry
+                    ui.collapsing("Fishing Mode Entry", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Hue center (°):");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_mode_hue_center, 0.0..=360.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hue range (±°):");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_mode_hue_range, 5.0..=60.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min saturation:");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_mode_min_saturation, 0.1..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min pixels:");
+                            ui.add(egui::DragValue::new(&mut self.config.fishing_mode_min_pixels).range(1..=200));
+                        });
+                        ui.separator();
+                        ui.label("Region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.fishing_mode_region { dv(v, ui); } });
+                    });
+
+                    // Rod Selection
+                    ui.collapsing("Rod Selection", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Hue center (°):");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_rod_hue_center, 0.0..=360.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hue range (±°):");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_rod_hue_range, 5.0..=80.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min saturation:");
+                            ui.add(egui::Slider::new(&mut self.config.fishing_rod_min_saturation, 0.1..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min pixels:");
+                            ui.add(egui::DragValue::new(&mut self.config.fishing_rod_min_pixels).range(1..=200));
+                        });
+                        ui.separator();
+                        ui.label("Rod detect region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.fishing_rod_region { dv(v, ui); } });
+                        ui.label("Use rod button [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.rod_use_region { dv(v, ui); } });
+                    });
+
+                    // Bite Detection & Casting
+                    ui.collapsing("Bite Detection & Casting", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Hue center (°):");
+                            ui.add(egui::Slider::new(&mut self.config.bite_hue_center, 0.0..=360.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hue range (±°):");
+                            ui.add(egui::Slider::new(&mut self.config.bite_hue_range, 5.0..=60.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min saturation:");
+                            ui.add(egui::Slider::new(&mut self.config.bite_min_saturation, 0.1..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min pixels:");
+                            ui.add(egui::DragValue::new(&mut self.config.bite_min_pixels).range(1..=500));
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Cast delay (ms):");
+                            ui.add(egui::DragValue::new(&mut self.config.cast_delay_ms).range(500..=5000));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Bite timeout (ms):");
+                            ui.add(egui::DragValue::new(&mut self.config.bite_timeout_ms).range(5000..=60000));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Cooldown (ms):");
+                            ui.add(egui::DragValue::new(&mut self.config.cooldown_ms).range(100..=3000));
+                        });
+                        ui.separator();
+                        ui.label("Bite detect region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.detect_region { dv(v, ui); } });
+                    });
+
+                    // Reeling
+                    ui.collapsing("Reeling", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.strong("Arrow indicators");
+                        ui.horizontal(|ui| {
+                            ui.label("Hue center (°):");
+                            ui.add(egui::Slider::new(&mut self.config.arrow_hue_center, 0.0..=360.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hue range (±°):");
+                            ui.add(egui::Slider::new(&mut self.config.arrow_hue_range, 5.0..=60.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min saturation:");
+                            ui.add(egui::Slider::new(&mut self.config.arrow_min_saturation, 0.1..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min pixels:");
+                            ui.add(egui::DragValue::new(&mut self.config.arrow_min_pixels).range(1..=500));
+                        });
+                        ui.label("Left arrow region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.left_arrow_region { dv(v, ui); } });
+                        ui.label("Right arrow region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.right_arrow_region { dv(v, ui); } });
+                        ui.separator();
+                        ui.strong("Timings");
+                        ui.horizontal(|ui| {
+                            ui.label("Reel timeout (ms):");
+                            ui.add(egui::DragValue::new(&mut self.config.reel_timeout_ms).range(5000..=120_000));
+                        });
+                        ui.separator();
+                        ui.strong("Tension bar");
+                        ui.horizontal(|ui| {
+                            ui.label("Hue center (°):");
+                            ui.add(egui::Slider::new(&mut self.config.tension_bar_hue_center, 0.0..=360.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hue range (±°):");
+                            ui.add(egui::Slider::new(&mut self.config.tension_bar_hue_range, 5.0..=60.0).fixed_decimals(0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min saturation:");
+                            ui.add(egui::Slider::new(&mut self.config.tension_bar_min_saturation, 0.1..=1.0).fixed_decimals(2));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min pixels (presence threshold):");
+                            ui.add(egui::DragValue::new(&mut self.config.tension_bar_min_pixels).range(1..=500));
+                        });
+                        ui.label("Tension bar region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.tension_bar_region { dv(v, ui); } });
+                    });
+
+                    // Fish Caught
+                    ui.collapsing("Fish Caught", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Brightness threshold (per pixel):");
+                            ui.add(egui::Slider::new(&mut self.config.fish_caught_threshold, 50..=250));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min bright pixels:");
+                            ui.add(egui::DragValue::new(&mut self.config.fish_caught_min_pixels).range(10..=5000));
+                        });
+                        ui.separator();
+                        ui.label("Continue button region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.fish_caught_region { dv(v, ui); } });
+                    });
+
+                    ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("Detect window").clicked() {
-                            if let Some((id, wx, wy, ww, wh)) =
-                                find_game_window(&self.config.game_window_title)
-                            {
-                                self.apply_window_detection(id, wx, wy, ww, wh);
+                        if ui.button("💾 Save Config").clicked() {
+                            let mut to_save = self.config.clone();
+                            scale_regions(&mut to_save, self.last_window_size, (1600, 900));
+                            to_save.save();
+                        }
+                        if ui.button("Reset to Defaults").clicked() {
+                            let base = self.last_window_size;
+                            self.config = FishingConfig::default();
+                            scale_regions(&mut self.config, (1600, 900), base);
+                            if let Some((wx, wy, _, _)) = self.detected_window {
+                                self.config.window_origin = (wx, wy);
                             }
                         }
-                        match self.detected_window {
-                            Some((x, y, w, h)) => { ui.label(format!("({x},{y}) {w}×{h}")); }
-                            None               => { ui.label("not detected"); }
-                        }
-                    });
-
-                    ui.separator();
-                    ui.strong("Hotkeys");
-                    ui.horizontal(|ui| {
-                        ui.label("Enter fishing mode:");
-                        ui.add(egui::TextEdit::singleline(&mut self.config.fishing_key).desired_width(40.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Open rod equipment:");
-                        ui.add(egui::TextEdit::singleline(&mut self.config.rod_slot_key).desired_width(40.0));
-                    });
-
-                    ui.separator();
-                    ui.strong("Fishing mode entry");
-                    ui.horizontal(|ui| {
-                        ui.label("Hue center (°):");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_mode_hue_center, 0.0..=360.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Hue range (±°):");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_mode_hue_range, 5.0..=60.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min saturation:");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_mode_min_saturation, 0.1..=1.0).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min pixels:");
-                        ui.add(egui::DragValue::new(&mut self.config.fishing_mode_min_pixels).range(1..=200));
-                    });
-
-                    ui.separator();
-                    ui.strong("Fishing rod detect");
-                    ui.horizontal(|ui| {
-                        ui.label("Hue center (°):");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_rod_hue_center, 0.0..=360.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Hue range (±°):");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_rod_hue_range, 5.0..=80.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min saturation:");
-                        ui.add(egui::Slider::new(&mut self.config.fishing_rod_min_saturation, 0.1..=1.0).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min pixels:");
-                        ui.add(egui::DragValue::new(&mut self.config.fishing_rod_min_pixels).range(1..=200));
-                    });
-
-                    ui.separator();
-                    ui.strong("Bite detection");
-                    ui.horizontal(|ui| {
-                        ui.label("Hue center (°):");
-                        ui.add(egui::Slider::new(&mut self.config.bite_hue_center, 0.0..=360.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Hue range (±°):");
-                        ui.add(egui::Slider::new(&mut self.config.bite_hue_range, 5.0..=60.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min saturation:");
-                        ui.add(egui::Slider::new(&mut self.config.bite_min_saturation, 0.1..=1.0).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min pixels:");
-                        ui.add(egui::DragValue::new(&mut self.config.bite_min_pixels).range(1..=500));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Cast delay (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.cast_delay_ms).range(500..=5000));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Bite timeout (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.bite_timeout_ms).range(5000..=60000));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Cooldown (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.cooldown_ms).range(100..=3000));
-                    });
-
-                    ui.separator();
-                    ui.strong("Reeling");
-                    ui.horizontal(|ui| {
-                        ui.label("Lure hue center (°):");
-                        ui.add(egui::Slider::new(&mut self.config.lure_hue_center, 0.0..=360.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Lure hue range (±°):");
-                        ui.add(egui::Slider::new(&mut self.config.lure_hue_range, 5.0..=60.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Lure min saturation:");
-                        ui.add(egui::Slider::new(&mut self.config.lure_min_saturation, 0.1..=1.0).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Bait center margin:");
-                        ui.add(egui::Slider::new(&mut self.config.bait_center_margin_pct, 0.1..=0.4).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Reel hold (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.reel_hold_ms).range(200..=1000));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Reel pause (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.reel_pause_ms).range(100..=800));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Reel timeout (ms):");
-                        ui.add(egui::DragValue::new(&mut self.config.reel_timeout_ms).range(5000..=120_000));
-                    });
-
-                    ui.separator();
-                    ui.strong("Tension bar detect");
-                    ui.horizontal(|ui| {
-                        ui.label("Hue center (°):");
-                        ui.add(egui::Slider::new(&mut self.config.tension_bar_hue_center, 0.0..=360.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Hue range (±°):");
-                        ui.add(egui::Slider::new(&mut self.config.tension_bar_hue_range, 5.0..=60.0).fixed_decimals(0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min saturation:");
-                        ui.add(egui::Slider::new(&mut self.config.tension_bar_min_saturation, 0.1..=1.0).fixed_decimals(2));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min pixels (presence threshold):");
-                        ui.add(egui::DragValue::new(&mut self.config.tension_bar_min_pixels).range(1..=500));
-                    });
-
-                    ui.separator();
-                    ui.strong("Fish caught detect");
-                    ui.horizontal(|ui| {
-                        ui.label("Brightness threshold (per pixel):");
-                        ui.add(egui::Slider::new(&mut self.config.fish_caught_threshold, 50..=250));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Min bright pixels:");
-                        ui.add(egui::DragValue::new(&mut self.config.fish_caught_min_pixels).range(10..=5000));
                     });
                 });
         });
@@ -597,7 +838,7 @@ impl Module for FishingModule {
         // ── Regions & Preview ────────────────────────────────────────────
         ui.separator();
         ui.collapsing("Regions & Preview", |ui| {
-            // Capture / open controls
+            // Color legend
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(220, 100, 255), "■ Fishing mode");
                 ui.colored_label(egui::Color32::from_rgb(255, 220,   0), "■ Fishing rod");
@@ -605,6 +846,8 @@ impl Module for FishingModule {
                 ui.colored_label(egui::Color32::from_rgb(255, 150,   0), "■ Bite");
                 ui.colored_label(egui::Color32::from_rgb(  0, 220, 200), "■ Tension bar");
                 ui.colored_label(egui::Color32::from_rgb( 50, 180, 255), "■ Continue btn");
+                ui.colored_label(egui::Color32::from_rgb(255,  80, 200), "■ Left arrow");
+                ui.colored_label(egui::Color32::from_rgb(255, 160, 220), "■ Right arrow");
             });
             ui.horizontal(|ui| {
                 if ui.button("Capture preview").clicked() {
@@ -637,41 +880,8 @@ impl Module for FishingModule {
                 let scale = (max_w / size.x).min(1.0);
                 ui.add(egui::Image::new(tex).fit_to_exact_size(size * scale));
             }
-
-            // Region offsets (all relative to game window origin)
-            ui.separator();
-            ui.label("All offsets relative to game window top-left.");
-            egui::ScrollArea::vertical()
-                .max_height(300.0)
-                .auto_shrink([false, false])
-                .id_salt("fishing_regions_scroll")
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let dv = |v: &mut i32, ui: &mut egui::Ui| {
-                        ui.add(egui::DragValue::new(v).range(-200..=3840));
-                    };
-
-                    ui.strong("Fishing mode detect [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.fishing_mode_region { dv(v, ui); } });
-
-                    ui.strong("Fishing rod detect [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.fishing_rod_region { dv(v, ui); } });
-
-                    ui.strong("Use fishing rod button [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.rod_use_region { dv(v, ui); } });
-
-                    ui.strong("Bite detect [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.detect_region { dv(v, ui); } });
-
-                    ui.strong("Tension bar [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.tension_bar_region { dv(v, ui); } });
-
-                    ui.strong("Continue fishing button [ox, oy, w, h]");
-                    ui.horizontal(|ui| { for v in &mut self.config.fish_caught_region { dv(v, ui); } });
-                });
         });
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-
 }

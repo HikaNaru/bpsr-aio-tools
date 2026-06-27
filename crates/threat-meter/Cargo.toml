@@ -1,0 +1,9 @@
+[package]
+name    = "threat-meter"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core  = { path = "../core" }
+game  = { path = "../game" }
+egui  = { workspace = true }

@@ -1,7 +1,7 @@
 use crate::proto::packets::pb;
 use bpsr_core::types::EntityId;
 use game::entity::CharStats;
-use game::event::{CombatEvent, GameEvent, ModuleEffect, PlayerModule};
+use game::event::{ChatChannel, CombatEvent, DungeonStateKind, GameEvent, MatchAlertKind, ModuleEffect, PlayerModule};
 use prost::Message;
 use std::time::Instant;
 use tracing::debug;
@@ -13,10 +13,20 @@ pub const METHOD_SYNC_NEAR_ENTITIES:   u32 = 0x00000006;
 pub const METHOD_SYNC_CONTAINER_DATA:  u32 = 0x00000015;
 pub const METHOD_SYNC_NEAR_DELTA_INFO: u32 = 0x0000002D;
 pub const METHOD_SYNC_TO_ME_DELTA:     u32 = 0x0000002E;
+pub const METHOD_SYNC_DUNGEON_DATA:    u32 = 0x00000017;
 
 // Social notification service (scene/zone data)
 pub const SOCIAL_NTF_SERVICE_UUID: u64 = 0x254C89A3;
 pub const SOCIAL_NTF_METHOD_ID:    u32 = 1;
+
+// Chat service
+pub const CHIT_CHAT_NTF_UUID:       u64 = 164_931_432;
+pub const METHOD_NOTIFY_NEWEST_MSGS: u32 = 0x01;
+
+// Matchmaking service
+pub const MATCH_NTF_UUID:              u64 = 822_849_903;
+pub const METHOD_ENTER_MATCH_RESULT:   u32 = 0x04;
+pub const METHOD_MATCH_READY_STATUS:   u32 = 0x06;
 
 /// Dispatch a Notify payload to game events.
 pub fn dispatch(service_uuid: u64, method_id: u32, data: &[u8]) -> Vec<GameEvent> {
@@ -24,6 +34,34 @@ pub fn dispatch(service_uuid: u64, method_id: u32, data: &[u8]) -> Vec<GameEvent
         return match pb::NotifySocialData::decode(data) {
             Ok(msg) => parse_notify_social_data(msg),
             Err(e)  => { debug!("NotifySocialData decode failed: {e}"); vec![] }
+        };
+    }
+
+    if service_uuid == CHIT_CHAT_NTF_UUID {
+        if method_id == METHOD_NOTIFY_NEWEST_MSGS {
+            return match pb::NotifyNewestChitChatMsgs::decode(data) {
+                Ok(msg) => parse_chat(msg),
+                Err(e)  => { debug!("NotifyNewestChitChatMsgs decode failed: {e}"); vec![] }
+            };
+        }
+        return vec![];
+    }
+
+    if service_uuid == MATCH_NTF_UUID {
+        return match method_id {
+            METHOD_ENTER_MATCH_RESULT => {
+                match pb::EnterMatchResultNtf::decode(data) {
+                    Ok(msg) => parse_enter_match_result(msg),
+                    Err(e)  => { debug!("EnterMatchResultNtf decode failed: {e}"); vec![] }
+                }
+            }
+            METHOD_MATCH_READY_STATUS => {
+                match pb::MatchReadyStatusNtf::decode(data) {
+                    Ok(_)  => vec![GameEvent::MatchmakingAlert { kind: MatchAlertKind::ReadyCheck }],
+                    Err(e) => { debug!("MatchReadyStatusNtf decode failed: {e}"); vec![] }
+                }
+            }
+            _ => vec![],
         };
     }
 
@@ -64,12 +102,19 @@ pub fn dispatch(service_uuid: u64, method_id: u32, data: &[u8]) -> Vec<GameEvent
                         if let Some(mut base) = delta_info.base_delta {
                             // base.uuid may be 0 in SyncToMeDeltaInfo; use outer uuid
                             if base.uuid == 0 { base.uuid = outer_uuid; }
-                            events.extend(parse_aoi_sync_delta(base));
+                            // Own player — always parse as player regardless of ent_type bits
+                            events.extend(parse_aoi_sync_delta_as_player(base));
                         }
                     }
                     events
                 }
                 Err(e) => { debug!("SyncToMeDeltaInfo decode failed: {e}"); vec![] }
+            }
+        }
+        METHOD_SYNC_DUNGEON_DATA => {
+            match pb::SyncDungeonData::decode(data) {
+                Ok(msg) => parse_sync_dungeon_data(msg),
+                Err(e) => { debug!("SyncDungeonData decode failed: {e}"); vec![] }
             }
         }
         _ => {
@@ -85,10 +130,14 @@ fn parse_sync_near_entities(msg: pb::SyncNearEntities) -> Vec<GameEvent> {
         if entity.uuid == 0 { continue; }
         let entity_id = EntityId((entity.uuid >> 16) as u64);
 
-        // ent_type 10 = player, 1 = monster
+        // ent_type 10 = player, 1 = monster, 11 = dummy
         if entity.ent_type == 10 {
             if let Some(attrs) = entity.attrs {
                 events.extend(parse_player_attrs(entity_id, attrs.attrs));
+            }
+        } else if entity.ent_type == 1 || entity.ent_type == 11 {
+            if let Some(attrs) = entity.attrs {
+                events.extend(parse_npc_attrs(entity_id, entity.ent_type, attrs.attrs));
             }
         }
     }
@@ -570,6 +619,15 @@ fn parse_sync_container_data(msg: pb::SyncContainerData) -> Vec<GameEvent> {
     }
     events.push(GameEvent::LocalPlayer { id: entity_id });
 
+    // AS (fight_point) is in char_base for own character only
+    if let Some(base) = &v_data.char_base {
+        if base.fight_point > 0 {
+            let mut stats = CharStats::default();
+            stats.ability_score = Some(base.fight_point as u32);
+            events.push(GameEvent::EntityStats { id: entity_id, stats });
+        }
+    }
+
     // Extract player module inventory
     let modules = extract_modules(v_data.item_package.as_ref(), v_data.r#mod.as_ref());
     if !modules.is_empty() {
@@ -627,27 +685,103 @@ fn is_valid_effect_id(id: i32) -> bool {
     )
 }
 
-fn parse_aoi_sync_delta(delta: pb::AoiSyncDelta) -> Vec<GameEvent> {
+/// Same as parse_aoi_sync_delta but always treats entity as a player.
+/// Used for SyncToMeDeltaInfo (own character) where ent_type bits may not encode 10.
+fn parse_aoi_sync_delta_as_player(delta: pb::AoiSyncDelta) -> Vec<GameEvent> {
     let mut events = Vec::new();
     let target_uuid = delta.uuid;
     if target_uuid == 0 { return events; }
     let target_id = EntityId((target_uuid >> 16) as u64);
 
-    // Attribute updates (player name, class)
     if let Some(attrs) = delta.attrs {
         events.extend(parse_player_attrs(target_id, attrs.attrs));
     }
-
-    // Damage events
     if let Some(skill_effects) = delta.skill_effects {
         for dmg in skill_effects.damages {
-            if let Some(event) = parse_damage(target_uuid, &dmg) {
+            if dmg.r#type == 2 {
+                if let Some(event) = parse_heal(target_uuid, &dmg) {
+                    events.push(GameEvent::Heal(event));
+                }
+            } else if let Some(event) = parse_damage(target_uuid, &dmg) {
+                events.push(GameEvent::Combat(event));
+            }
+        }
+    }
+    events
+}
+
+fn parse_aoi_sync_delta(delta: pb::AoiSyncDelta) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    let target_uuid = delta.uuid;
+    if target_uuid == 0 { return events; }
+    let target_id = EntityId((target_uuid >> 16) as u64);
+    // Entity type is embedded in UUID bits [10:6] — same encoding as game client
+    let ent_type = ((target_uuid >> 6) & 31) as i32;
+
+    if let Some(attrs) = delta.attrs {
+        if ent_type == 10 {
+            events.extend(parse_player_attrs(target_id, attrs.attrs));
+        } else {
+            events.extend(parse_npc_attrs(target_id, ent_type, attrs.attrs));
+        }
+    }
+
+    // Damage + heal events
+    if let Some(skill_effects) = delta.skill_effects {
+        for dmg in skill_effects.damages {
+            if dmg.r#type == 2 {
+                if let Some(event) = parse_heal(target_uuid, &dmg) {
+                    events.push(GameEvent::Heal(event));
+                }
+            } else if let Some(event) = parse_damage(target_uuid, &dmg) {
                 events.push(GameEvent::Combat(event));
             }
         }
     }
 
     events
+}
+
+/// Resolve name for non-player entities (monsters, dummies) from their attrs.
+/// AttrId (id=10) contains the config ID used to look up the name in data tables.
+/// AttrName (id=1) is a direct name string (fallback).
+fn parse_npc_attrs(entity_id: EntityId, ent_type: i32, attrs: Vec<pb::Attr>) -> Vec<GameEvent> {
+    let mut name_direct = None::<String>;
+    let mut config_id   = None::<u32>;
+
+    for attr in &attrs {
+        match attr.id {
+            1 => {
+                if attr.raw_data.len() > 1 {
+                    if let Ok(s) = std::str::from_utf8(&attr.raw_data[1..]) {
+                        let s = s.trim_matches('\0').to_string();
+                        if !s.is_empty() { name_direct = Some(s); }
+                    }
+                }
+            }
+            10 => {
+                if let Some(id) = decode_varint(&attr.raw_data) {
+                    config_id = Some(id as u32);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let resolved = config_id.and_then(|id| {
+        match ent_type {
+            1  => bpsr_core::DATA.monster_name(id),
+            11 => bpsr_core::DATA.dummy_name(id),
+            _  => None,
+        }
+    }).map(|s| s.to_string())
+    .or(name_direct);
+
+    if let Some(name) = resolved {
+        vec![GameEvent::EntityName { id: entity_id, name, class: None }]
+    } else {
+        vec![]
+    }
 }
 
 fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEvent> {
@@ -676,9 +810,10 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
                 }
             }
             // --- Stats ---
-            // Level = 10000, AbilityScore (FightPoint) = 10030
-            10000 => { stats.level         = decode_varint(&attr.raw_data).map(|v| v as u32); }
-            10030 => { stats.ability_score = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            // Level = 10000, AbilityScore (FightPoint) = 10030, SeasonStrength = 11440
+            10000 => { stats.level           = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            10030 => { stats.ability_score   = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            11440 => { stats.season_strength = decode_varint(&attr.raw_data).map(|v| v as u32); }
             // Base stats (i32)
             11010 => { stats.strength   = decode_varint(&attr.raw_data).map(|v| v as u32); }
             11040 => { stats.endurance  = decode_varint(&attr.raw_data).map(|v| v as u32); }
@@ -701,6 +836,9 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
             11940 => { stats.mastery_pct     = decode_varint(&attr.raw_data).map(|v| v as u32); }
             11950 => { stats.versatility_pct = decode_varint(&attr.raw_data).map(|v| v as u32); }
             11970 => { stats.block_pct       = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            11720 => { stats.atk_speed_pct  = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            11730 => { stats.cast_speed_pct = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            12510 => { stats.crit_damage    = decode_varint(&attr.raw_data).map(|v| v as u32); }
             _ => {}
         }
     }
@@ -712,11 +850,14 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
             class,
         });
     }
-    let has_stats = stats.level.is_some() || stats.ability_score.is_some()
+    let has_stats = stats.level.is_some() || stats.ability_score.is_some() || stats.season_strength.is_some()
         || stats.hp.is_some() || stats.max_hp.is_some() || stats.attack.is_some()
         || stats.strength.is_some() || stats.endurance.is_some() || stats.armor.is_some()
         || stats.crit.is_some() || stats.haste.is_some() || stats.luck.is_some()
-        || stats.mastery.is_some() || stats.versatility.is_some() || stats.block.is_some();
+        || stats.mastery.is_some() || stats.versatility.is_some() || stats.block.is_some()
+        || stats.crit_pct.is_some() || stats.luck_pct.is_some() || stats.haste_pct.is_some()
+        || stats.mastery_pct.is_some() || stats.versatility_pct.is_some() || stats.block_pct.is_some()
+        || stats.atk_speed_pct.is_some() || stats.cast_speed_pct.is_some() || stats.crit_damage.is_some();
     if has_stats {
         events.push(GameEvent::EntityStats { id: entity_id, stats });
     }
@@ -753,6 +894,67 @@ fn parse_damage(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEven
         is_dot:     false,
         element:    None,
     })
+}
+
+fn parse_heal(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEvent> {
+    if dmg.owner_id == 0 { return None; }
+    let healer_uuid = if dmg.top_summoner_id != 0 {
+        dmg.top_summoner_id
+    } else if dmg.attacker_uuid != 0 {
+        dmg.attacker_uuid
+    } else {
+        return None;
+    };
+    let amount = if dmg.lucky_value != 0 { dmg.lucky_value } else { dmg.value };
+    if amount <= 0 { return None; }
+    let is_crit = (dmg.type_flag & 0b0000_0001) != 0;
+    Some(CombatEvent {
+        timestamp: Instant::now(),
+        source_id: EntityId((healer_uuid >> 16) as u64),
+        target_id: EntityId((target_uuid >> 16) as u64),
+        skill_id:  dmg.owner_id as u32,
+        damage:    amount as u64,
+        is_crit,
+        is_dot:    false,
+        element:   None,
+    })
+}
+
+fn parse_chat(msg: pb::NotifyNewestChitChatMsgs) -> Vec<GameEvent> {
+    let Some(req) = msg.v_request else { return vec![] };
+    let Some(chat) = req.chat_msg else { return vec![] };
+    let Some(info) = chat.msg_info else { return vec![] };
+    if info.msg_text.is_empty() { return vec![]; }
+
+    let (sender_name, sender_uid) = chat.send_char_info
+        .map(|i| (i.name, i.char_id as u64))
+        .unwrap_or_default();
+
+    vec![GameEvent::Chat {
+        channel:     ChatChannel::from_i32(req.channel_type),
+        sender_name,
+        sender_uid,
+        text:        info.msg_text,
+    }]
+}
+
+fn parse_enter_match_result(msg: pb::EnterMatchResultNtf) -> Vec<GameEvent> {
+    let Some(req) = msg.v_request else { return vec![] };
+    if req.err_code != 0 { return vec![]; }
+    let status = req.match_info.map(|i| i.match_status).unwrap_or(0);
+    // WaitReady (2) = queue popped, need to ready
+    if status == 2 {
+        return vec![GameEvent::MatchmakingAlert { kind: MatchAlertKind::QueuePop }];
+    }
+    vec![]
+}
+
+fn parse_sync_dungeon_data(msg: pb::SyncDungeonData) -> Vec<GameEvent> {
+    let Some(data) = msg.v_data else { return vec![] };
+    let Some(flow) = data.flow_info else { return vec![] };
+    vec![GameEvent::DungeonState {
+        state: DungeonStateKind::from_i32(flow.state),
+    }]
 }
 
 /// Standard protobuf varint decoder.

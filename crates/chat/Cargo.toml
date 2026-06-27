@@ -1,0 +1,10 @@
+[package]
+name    = "chat"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core    = { path = "../core" }
+game    = { path = "../game" }
+egui    = { workspace = true }
+tracing = { workspace = true }

@@ -1,14 +1,15 @@
 use crate::entity::Entity;
-use crate::event::GameEvent;
+use crate::event::{DungeonStateKind, GameEvent};
 use core::types::EntityId;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct GameState {
-    pub entities:      HashMap<EntityId, Entity>,
-    pub local_player:  Option<EntityId>,
-    pub zone_id:       Option<u32>,
-    pub zone_name:     Option<String>,
+    pub entities:       HashMap<EntityId, Entity>,
+    pub local_player:   Option<EntityId>,
+    pub zone_id:        Option<u32>,
+    pub zone_name:      Option<String>,
+    pub dungeon_state:  Option<DungeonStateKind>,
 }
 
 impl GameState {
@@ -39,7 +40,16 @@ impl GameState {
                 let entity = self.entities.entry(*id).or_insert_with(|| Entity::new(*id));
                 entity.stats.merge(stats);
             }
-            GameEvent::Combat(_) | GameEvent::PlayerInventory { .. } | GameEvent::Unknown { .. } => {}
+            GameEvent::DungeonState { state } => {
+                self.dungeon_state = Some(state.clone());
+            }
+            GameEvent::Combat(_)
+            | GameEvent::Heal(_)
+            | GameEvent::PlayerInventory { .. }
+            | GameEvent::Chat { .. }
+            | GameEvent::MatchmakingAlert { .. }
+            | GameEvent::ThreatUpdate { .. }
+            | GameEvent::Unknown { .. } => {}
         }
     }
 

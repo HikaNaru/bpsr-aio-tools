@@ -11,17 +11,56 @@ pub struct AppConfig {
     pub lock_position:        bool,
     #[serde(default)]
     pub click_passthrough:    bool,
+    #[serde(default = "default_encounter_max_count")]
+    pub encounter_max_count:  usize,
+    #[serde(default = "default_encounter_max_age_days")]
+    pub encounter_max_age_days: u64,
+    #[serde(default = "default_true")]
+    pub match_notify: bool,
+    #[serde(default = "default_true")]
+    pub match_sound: bool,
+    #[serde(default)]
+    pub discord_enabled: bool,
+    #[serde(default)]
+    pub discord_webhook_url: String,
+    #[serde(default = "default_discord_min_players")]
+    pub discord_min_players: usize,
+
+    #[serde(default)]
+    pub bptimer_enabled: bool,
+    #[serde(default)]
+    pub bptimer_ws_url: String,
+    #[serde(default)]
+    pub bptimer_report_url: String,
+    #[serde(default)]
+    pub bptimer_region: String,
 }
+
+fn default_encounter_max_count() -> usize { 500 }
+fn default_encounter_max_age_days() -> u64 { 90 }
+fn default_true() -> bool { true }
+fn default_discord_min_players() -> usize { 2 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            dps_window_secs:        3,
-            encounter_timeout_secs: 30,
-            always_on_top:          true,
-            opacity:                1.0,
-            lock_position:          false,
-            click_passthrough:      false,
+            dps_window_secs:          3,
+            encounter_timeout_secs:   30,
+            always_on_top:            true,
+            opacity:                  1.0,
+            lock_position:            false,
+            click_passthrough:        false,
+            encounter_max_count:      500,
+            encounter_max_age_days:   90,
+            match_notify:             true,
+            match_sound:              true,
+            discord_enabled:          false,
+            discord_webhook_url:      String::new(),
+            discord_min_players:      2,
+            bptimer_enabled:          false,
+            bptimer_ws_url:           String::new(),
+            bptimer_report_url:       String::new(),
+            bptimer_region:           String::new(),
         }
     }
 }

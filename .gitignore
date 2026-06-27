@@ -17,5 +17,9 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Config
+
+/config/
+
 # Debug output
 /tmp/

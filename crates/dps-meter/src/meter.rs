@@ -2,7 +2,7 @@ use core::types::EntityId;
 use game::event::CombatEvent;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillStat {
     pub skill_id:  u32,
@@ -17,6 +17,8 @@ pub struct PlayerMeter {
     pub entity_id:       EntityId,
     pub player_name:     String,
     pub total_damage:    u64,
+    pub damage_taken:    u64,
+    pub total_healing:   u64,
     pub hit_count:       u64,
     pub crit_count:      u64,
     pub skill_breakdown: IndexMap<u32, SkillStat>,
@@ -29,11 +31,13 @@ impl PlayerMeter {
         Self {
             entity_id,
             player_name,
-            total_damage: 0,
-            hit_count: 0,
-            crit_count: 0,
+            total_damage:  0,
+            damage_taken:  0,
+            total_healing: 0,
+            hit_count:     0,
+            crit_count:    0,
             skill_breakdown: IndexMap::new(),
-            dps_timeline: Vec::new(),
+            dps_timeline:  Vec::new(),
         }
     }
 
@@ -57,18 +61,18 @@ impl PlayerMeter {
         }
     }
 
-    pub fn current_dps(&self, encounter_start: Instant, window_secs: f64) -> f64 {
-        let elapsed = encounter_start.elapsed().as_secs_f64();
-        if elapsed < 0.1 {
-            return 0.0;
-        }
-        self.total_damage as f64 / elapsed.min(window_secs).max(1.0)
+    pub fn apply_heal(&mut self, amount: u64) {
+        self.total_healing += amount;
+    }
+
+    /// Average DPS over the encounter duration. Same formula as DPS tile — never 0 after first hit.
+    pub fn avg_dps(&self, elapsed: f64) -> f64 {
+        if elapsed <= 0.0 { return 0.0; }
+        self.total_damage as f64 / elapsed
     }
 
     pub fn crit_rate(&self) -> f64 {
-        if self.hit_count == 0 {
-            return 0.0;
-        }
+        if self.hit_count == 0 { return 0.0; }
         self.crit_count as f64 / self.hit_count as f64
     }
 }

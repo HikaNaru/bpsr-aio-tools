@@ -200,3 +200,125 @@ pub struct NotifySocialData {
     #[prost(message, optional, tag = "1")]
     pub v_request: Option<NotifySocialDataRequest>,
 }
+
+// ─── Chat (ChitChatNtf, method 0x01) ──────────────────────────────────────
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BasicShowInfo {
+    #[prost(int64, tag = "1")]
+    pub char_id: i64,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(int32, tag = "5")]
+    pub level: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChatMsgInfo {
+    #[prost(int32, tag = "1")]
+    pub msg_type: i32,
+    #[prost(int64, tag = "2")]
+    pub target_id: i64,
+    #[prost(string, tag = "3")]
+    pub msg_text: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChitChatMsg {
+    #[prost(int64, tag = "1")]
+    pub msg_id: i64,
+    #[prost(message, optional, tag = "2")]
+    pub send_char_info: Option<BasicShowInfo>,
+    #[prost(int64, tag = "3")]
+    pub timestamp: i64,
+    #[prost(message, optional, tag = "4")]
+    pub msg_info: Option<ChatMsgInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotifyNewestChitChatMsgsRequest {
+    #[prost(int32, tag = "1")]
+    pub channel_type: i32,
+    #[prost(message, optional, tag = "2")]
+    pub chat_msg: Option<ChitChatMsg>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotifyNewestChitChatMsgs {
+    #[prost(message, optional, tag = "1")]
+    pub v_request: Option<NotifyNewestChitChatMsgsRequest>,
+}
+
+// ─── Matchmaking (MatchNtf, methods 0x04 / 0x06) ─────────────────────────
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchInfo {
+    #[prost(int32, tag = "2")]
+    pub match_status: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EnterMatchResultNtfRequest {
+    #[prost(int32, tag = "1")]
+    pub err_code: i32,
+    #[prost(message, optional, tag = "2")]
+    pub match_info: Option<MatchInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EnterMatchResultNtf {
+    #[prost(message, optional, tag = "1")]
+    pub v_request: Option<EnterMatchResultNtfRequest>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchPlayerInfo {
+    #[prost(int64, tag = "1")]
+    pub char_id: i64,
+    #[prost(int32, tag = "2")]
+    pub ready_status: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchReadyStatusNtfRequest {
+    #[prost(int32, tag = "1")]
+    pub err_code: i32,
+    #[prost(int64, tag = "2")]
+    pub leader_char_id: i64,
+    #[prost(message, repeated, tag = "5")]
+    pub match_player_info: Vec<MatchPlayerInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchReadyStatusNtf {
+    #[prost(message, optional, tag = "1")]
+    pub v_request: Option<MatchReadyStatusNtfRequest>,
+}
+
+// ─── Dungeon (WorldNtf, method 0x17 SYNC_DUNGEON_DATA) ───────────────────
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DungeonFlowInfo {
+    #[prost(int32, tag = "1")]
+    pub state: i32,
+    #[prost(int32, tag = "2")]
+    pub active_time: i32,
+    #[prost(int32, tag = "3")]
+    pub ready_time: i32,
+    #[prost(int32, tag = "4")]
+    pub play_time: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DungeonSyncData {
+    #[prost(int64, tag = "1")]
+    pub scene_uuid: i64,
+    #[prost(message, optional, tag = "2")]
+    pub flow_info: Option<DungeonFlowInfo>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SyncDungeonData {
+    #[prost(message, optional, tag = "1")]
+    pub v_data: Option<DungeonSyncData>,
+}
