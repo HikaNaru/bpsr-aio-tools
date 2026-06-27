@@ -444,6 +444,7 @@ impl FishingModule {
                                 match (held_steer_key.as_deref(), desired) {
                                     (Some(cur), Some(want)) if cur == want => {
                                         // Resend keydown — Wayland XTest state does not persist.
+                                        let _ = input.key_up(cur);
                                         let _ = input.key_down(cur);
                                     }
                                     (Some(cur), Some(want)) => {
@@ -454,6 +455,7 @@ impl FishingModule {
                                     }
                                     (Some(cur), None) => {
                                         // Center: keep holding previous key (Wayland resend).
+                                        let _ = input.key_up(cur);
                                         let _ = input.key_down(cur);
                                     }
                                     (None, Some(want)) => {
