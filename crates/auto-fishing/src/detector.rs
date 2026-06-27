@@ -441,6 +441,105 @@ pub fn detect_bait_position_on_image(cfg: &FishingConfig, img: &RgbaImage) -> Ba
     BaitPosition::Center
 }
 
+/// Merged bounding box (absolute screen coords) covering both arrow regions.
+/// Arrow thread captures only this small rect instead of the full screen.
+pub fn arrow_capture_region(cfg: &FishingConfig) -> [i32; 4] {
+    let l = resolve_region(cfg.window_origin, cfg.left_arrow_region);
+    let r = resolve_region(cfg.window_origin, cfg.right_arrow_region);
+    let x0 = l[0].min(r[0]);
+    let y0 = l[1].min(r[1]);
+    let x1 = (l[0] + l[2]).max(r[0] + r[2]);
+    let y1 = (l[1] + l[3]).max(r[1] + r[3]);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// Capture a specific screen region (absolute coords).
+/// Tries grim -g (Wayland region), then scrot -a (X11), then full capture + crop.
+pub fn capture_region(abs_region: [i32; 4]) -> Result<RgbaImage> {
+    let [rx, ry, rw, rh] = abs_region;
+    if rw <= 0 || rh <= 0 {
+        anyhow::bail!("invalid region dimensions");
+    }
+    let tmp = std::env::temp_dir().join("bpsr_arrow_crop.png");
+    let tmp_str = tmp.to_string_lossy();
+
+    // grim -g "x,y WxH" — Wayland wlroots region grab (fastest path)
+    let geom = format!("{},{} {}x{}", rx, ry, rw, rh);
+    if std::process::Command::new("grim")
+        .args(["-g", &geom, &*tmp_str])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return load_rgba(&tmp);
+    }
+
+    // scrot -a x,y,w,h — X11 region grab
+    let area = format!("{},{},{},{}", rx, ry, rw, rh);
+    if std::process::Command::new("scrot")
+        .args(["-a", &area, &*tmp_str])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return load_rgba(&tmp);
+    }
+
+    // Fallback: full capture + in-memory crop (always works)
+    let full = capture_screen()?;
+    let iw = full.width() as i32;
+    let ih = full.height() as i32;
+    let x0 = rx.clamp(0, iw - 1) as u32;
+    let y0 = ry.clamp(0, ih - 1) as u32;
+    let x1 = (rx + rw).clamp(0, iw) as u32;
+    let y1 = (ry + rh).clamp(0, ih) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        anyhow::bail!("arrow region out of screen bounds");
+    }
+    Ok(image::imageops::crop_imm(&full, x0, y0, x1 - x0, y1 - y0).to_image())
+}
+
+/// Detect bait position from a cropped image of the arrow bounding box.
+/// `crop_origin` = absolute screen coords of the crop's top-left pixel.
+pub fn detect_bait_position_from_crop(
+    cfg: &FishingConfig,
+    crop: &RgbaImage,
+    crop_origin: (i32, i32),
+) -> BaitPosition {
+    let translate = |region: [i32; 4]| -> [i32; 4] {
+        let abs = resolve_region(cfg.window_origin, region);
+        [abs[0] - crop_origin.0, abs[1] - crop_origin.1, abs[2], abs[3]]
+    };
+
+    if hue_value_count_on_image(
+        crop,
+        translate(cfg.left_arrow_region),
+        cfg.arrow_hue_center,
+        cfg.arrow_hue_range,
+        cfg.arrow_min_saturation,
+        cfg.arrow_min_value,
+        cfg.arrow_min_pixels,
+    ) {
+        return BaitPosition::Left;
+    }
+
+    if hue_value_count_on_image(
+        crop,
+        translate(cfg.right_arrow_region),
+        cfg.arrow_hue_center,
+        cfg.arrow_hue_range,
+        cfg.arrow_min_saturation,
+        cfg.arrow_min_value,
+        cfg.arrow_min_pixels,
+    ) {
+        return BaitPosition::Right;
+    }
+
+    BaitPosition::Center
+}
+
 /// Detect if the fish-caught result screen is showing.
 /// Dual condition (single screenshot):
 ///   1. ≥ fish_caught_min_pixels bright pixels in fish_caught_region

@@ -122,9 +122,9 @@ impl Default for FishingConfig {
 
             fishing_rod_region:         [1350, 810, 220, 75],
             fishing_rod_hue_center:     30.0,
-            fishing_rod_hue_range:      40.0,
-            fishing_rod_min_saturation: 0.3,
-            fishing_rod_min_pixels:     5,
+            fishing_rod_hue_range:      20.0,
+            fishing_rod_min_saturation: 0.60,
+            fishing_rod_min_pixels:     50,
             rod_slot_key:               "m".to_string(),
             rod_use_region:             [1355, 485, 150, 55],
 
@@ -140,11 +140,11 @@ impl Default for FishingConfig {
 
             reel_hold_ms:           400,
             reel_pause_ms:          300,
-            reel_timeout_ms:        30_000,
+            reel_timeout_ms:        60_000,
 
             // Left/right arrow indicators — close to bite detect region [700,350,200,200]
-            left_arrow_region:      [630, 400, 180, 100],
-            right_arrow_region:     [820, 400, 180, 100],
+            left_arrow_region:      [610, 400, 180, 100],
+            right_arrow_region:     [840, 400, 180, 100],
             // Orange arrow: H≈25°, S≈0.88, V≈0.90. Tighter range + V gate avoids background.
             arrow_hue_center:       25.0,
             arrow_hue_range:        20.0,

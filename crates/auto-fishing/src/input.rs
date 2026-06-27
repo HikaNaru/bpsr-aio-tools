@@ -51,6 +51,13 @@ impl InputController {
         run(&["mouseup", "1"])
     }
 
+    /// Release then immediately press LMB in one xdotool invocation.
+    /// Use for re-asserting hold: XTest only generates ButtonPress on state change,
+    /// so plain mousedown when already down is a no-op to the game.
+    pub fn mouse_repress(&mut self) -> Result<()> {
+        run(&["mouseup", "1", "mousedown", "1"])
+    }
+
     /// Move cursor to absolute screen position then left-click.
     pub fn click_at(&mut self, x: i32, y: i32) -> Result<()> {
         run(&["mousemove", "--sync", &x.to_string(), &y.to_string()])?;

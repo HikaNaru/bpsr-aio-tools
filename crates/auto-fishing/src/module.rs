@@ -1,8 +1,8 @@
 use crate::bot::FishingState;
 use crate::config::FishingConfig;
-use crate::detector::{BaitPosition, capture_screen, check_window_focus, detect_bait_position_on_image, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, resolve_region};
+use crate::detector::{arrow_capture_region, capture_region, capture_screen, check_window_focus, detect_bait_position_from_crop, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, resolve_region};
 use core::module::{Module, ModuleContext};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ui::theme;
@@ -137,8 +137,13 @@ impl FishingModule {
                 let mut lmb_held = false;
                 let mut held_steer_key: Option<String> = None;
                 let mut bar_absent_streak: u32 = 0;
-                // True while tension is >= 80% and cooling down; resume when < 50%.
+                let mut pct_zero_streak: u32 = 0;
+                // True while tension is 100%; clicks instead of hold until < 70%.
                 let mut tension_cooldown = false;
+                // Arrow detection thread — spawned on Reeling entry, stopped on exit.
+                // 0 = Center, 1 = Left, 2 = Right.
+                let arrow_state = Arc::new(AtomicU8::new(0u8));
+                let mut arrow_thread: Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>)> = None;
                 'outer: loop {
                     if stop_rx.try_recv().is_ok() {
                         break 'outer;
@@ -163,6 +168,15 @@ impl FishingModule {
                     }
 
                     let current = state_arc.lock().unwrap().clone();
+
+                    // Stop arrow thread whenever we leave Reeling state.
+                    if arrow_thread.is_some() && !matches!(current, FishingState::Reeling { .. }) {
+                        if let Some((h, tx)) = arrow_thread.take() {
+                            let _ = tx.send(());
+                            let _ = h.join();
+                        }
+                        arrow_state.store(0, Ordering::Relaxed);
+                    }
 
                     match current {
                         FishingState::CheckingState => {
@@ -270,6 +284,12 @@ impl FishingModule {
                                 }
                                 continue;
                             }
+                            // Rod still visible = cast did not land; retry from Idle.
+                            if detect_fishing_rod(&cfg).unwrap_or(false) {
+                                eprintln!("[auto-fishing] WaitingBite: rod still visible, cast failed — retrying");
+                                *state_arc.lock().unwrap() = FishingState::SelectingRod;
+                                continue;
+                            }
                             if crate::detector::detect_bite(&cfg).unwrap_or(false) {
                                 let _ = input.click_mouse_left();
                                 *state_arc.lock().unwrap() =
@@ -279,32 +299,43 @@ impl FishingModule {
                             }
                         }
                         FishingState::Reeling { started_at } => {
-                            let elapsed = started_at.elapsed();
-                            let timed_out = elapsed > Duration::from_millis(cfg.reel_timeout_ms);
-
-                            // Hard timeout — release everything, check result.
-                            if timed_out {
-                                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
-                                held_steer_key = None;
-                                if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
-                                tension_cooldown = false;
-                                tension_pct_arc.store(0, Ordering::Relaxed);
-                                eprintln!("[auto-fishing] exit: TIMEOUT at {}ms", elapsed.as_millis());
-                                std::thread::sleep(Duration::from_millis(300));
-                                if detect_fish_caught(&cfg).unwrap_or(false) {
-                                    *state_arc.lock().unwrap() = FishingState::FishCaught;
-                                } else {
-                                    eprintln!("[auto-fishing] Fish escaped (timeout)");
-                                    failed_count_arc.fetch_add(1, Ordering::Relaxed);
-                                    *state_arc.lock().unwrap() = FishingState::Cooldown {
-                                        until: Instant::now() + Duration::from_millis(cfg.cooldown_ms),
-                                    };
-                                }
-                                continue;
+                            // Spawn dedicated arrow detection thread on first Reeling entry.
+                            // It captures only the small arrow bounding box at ~20ms cadence,
+                            // avoiding the overhead of a full-screen capture per arrow check.
+                            if arrow_thread.is_none() {
+                                bar_absent_streak = 0;
+                                pct_zero_streak = 0;
+                                let (atx, arx) = std::sync::mpsc::channel::<()>();
+                                let astate = Arc::clone(&arrow_state);
+                                let acfg = cfg.clone();
+                                let bbox = arrow_capture_region(&acfg);
+                                let h = std::thread::Builder::new()
+                                    .name("arrow-detect".into())
+                                    .spawn(move || {
+                                        let origin = (bbox[0], bbox[1]);
+                                        loop {
+                                            if arx.try_recv().is_ok() { break; }
+                                            if let Ok(crop) = capture_region(bbox) {
+                                                let pos = detect_bait_position_from_crop(&acfg, &crop, origin);
+                                                let val = match pos {
+                                                    crate::detector::BaitPosition::Left   => 1u8,
+                                                    crate::detector::BaitPosition::Right  => 2u8,
+                                                    crate::detector::BaitPosition::Center => 0u8,
+                                                };
+                                                astate.store(val, Ordering::Relaxed);
+                                            }
+                                            std::thread::sleep(Duration::from_millis(20));
+                                        }
+                                    })
+                                    .expect("arrow thread");
+                                arrow_thread = Some((h, atx));
                             }
 
-                            // One screenshot covers all checks this iteration — arrow indicator
-                            // is visible for only ~1s; separate captures would miss it.
+                            let elapsed = started_at.elapsed();
+
+                            // One screenshot per main-loop iteration covers tension OCR,
+                            // fish-caught, and tension-bar checks. Arrow is handled separately
+                            // by the arrow thread at 20ms cadence.
                             let screenshot = match capture_screen() {
                                 Ok(s) => s,
                                 Err(_) => { std::thread::sleep(Duration::from_millis(50)); continue; }
@@ -313,33 +344,38 @@ impl FishingModule {
                             // Measure and publish tension percentage.
                             let pct = measure_tension_pct_on_image(&cfg, &screenshot);
                             tension_pct_arc.store(pct.round() as u32, Ordering::Relaxed);
-                            eprintln!("[auto-fishing] tension: {pct:.0}%");
+                            // eprintln!("[auto-fishing] tension: {pct:.0}%");
+                            if elapsed > Duration::from_millis(2000) {
+                                if pct == 0.0 { pct_zero_streak += 1; } else { pct_zero_streak = 0; }
+                            }
 
-                            // Tension gate: release at ≥80%, resume at <50%.
-                            if pct >= 80.0 {
+                            // Tension gate: switch to click mode at 100%, resume hold at <70%.
+                            if pct >= 100.0 && !tension_cooldown {
                                 if lmb_held {
                                     let _ = input.mouse_up();
                                     lmb_held = false;
-                                    tension_cooldown = true;
-                                    eprintln!("[auto-fishing] tension {pct:.0}% >= 80%: releasing LMB");
                                 }
-                            } else if tension_cooldown && pct < 50.0 {
+                                tension_cooldown = true;
+                                eprintln!("[auto-fishing] tension {pct:.0}% >= 100%: released hold, switching to click");
+                            } else if tension_cooldown && pct < 70.0 {
                                 tension_cooldown = false;
-                                eprintln!("[auto-fishing] tension {pct:.0}% < 50%: resuming LMB");
+                                eprintln!("[auto-fishing] tension {pct:.0}% < 70%: resuming hold");
                             }
 
-                            // LMB management — only hold when not in tension cooldown.
+                            // LMB: hold when normal; click each iteration during tension cooldown.
                             if !tension_cooldown {
                                 if !lmb_held {
-                                    eprintln!("[auto-fishing] holding LMB");
+                                    eprintln!("[auto-fishing] Start Reeling");
                                     let _ = input.mouse_down();
                                     lmb_held = true;
-                                    held_steer_key = None;
-                                    bar_absent_streak = 0;
                                 } else {
-                                    // Re-assert every iteration — XTest state may not persist on Xwayland.
-                                    let _ = input.mouse_down();
+                                    // Re-assert: up+down forces ButtonPress event (XTest no-ops plain down when already pressed).
+                                    // eprintln!("[auto-fishing] Keep holding LMB");
+                                    let _ = input.mouse_repress();
                                 }
+                            } else {
+                                // eprintln!("[auto-fishing] Keep clicking LMB to prevent fish escape");
+                                let _ = input.click_mouse_left();
                             }
 
                             // Primary exit: fish-caught screen appeared (skip first 1s).
@@ -363,13 +399,14 @@ impl FishingModule {
                                 } else {
                                     bar_absent_streak = 0;
                                 }
-                                if bar_absent_streak >= 10 {
+                                let should_exit = bar_absent_streak >= 10 || pct_zero_streak >= 30;
+                                if should_exit {
                                     if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
                                     held_steer_key = None;
                                     if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
                                     tension_cooldown = false;
                                     tension_pct_arc.store(0, Ordering::Relaxed);
-                                    eprintln!("[auto-fishing] STOPPED: bar_absent_streak={bar_absent_streak} (tension bar absent exit fired — LMB released here)");
+                                    eprintln!("[auto-fishing] STOPPED: bar_absent={bar_absent_streak} pct_zero={pct_zero_streak}");
                                     std::thread::sleep(Duration::from_millis(300));
                                     if detect_fish_caught(&cfg).unwrap_or(false) {
                                         *state_arc.lock().unwrap() = FishingState::FishCaught;
@@ -384,6 +421,7 @@ impl FishingModule {
                                 }
                             } else {
                                 bar_absent_streak = 0;
+                                pct_zero_streak = 0;
                             }
 
                             // Focus check — pause if window lost focus.
@@ -396,12 +434,12 @@ impl FishingModule {
                                 continue;
                             }
 
-                            // Steer — always active, regardless of tension cooldown.
+                            // Steer — read arrow state written by dedicated arrow thread.
                             {
-                                let desired: Option<&str> = match detect_bait_position_on_image(&cfg, &screenshot) {
-                                    BaitPosition::Left   => Some("a"),
-                                    BaitPosition::Right  => Some("d"),
-                                    BaitPosition::Center => None,
+                                let desired: Option<&str> = match arrow_state.load(Ordering::Relaxed) {
+                                    1 => Some("a"), // Left
+                                    2 => Some("d"), // Right
+                                    _ => None,      // Center
                                 };
                                 match (held_steer_key.as_deref(), desired) {
                                     (Some(cur), Some(want)) if cur == want => {
@@ -449,10 +487,12 @@ impl FishingModule {
                         }
                     }
                 }
-                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
-                if lmb_held {
-                    let _ = input.mouse_up();
+                if let Some((h, tx)) = arrow_thread.take() {
+                    let _ = tx.send(());
+                    let _ = h.join();
                 }
+                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                if lmb_held { let _ = input.mouse_up(); }
                 *state_arc.lock().unwrap() = FishingState::CheckingState;
             })
             .expect("fishing thread");
