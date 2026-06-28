@@ -282,15 +282,26 @@ fn ocr_region(screenshot: &RgbaImage, abs_region: [i32; 4], psm: &str) -> String
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FishingRodArea {
+    NoPole,     // "Add a Pole" visible — slot empty
+    HasPole,    // rod name visible — rod equipped
+    NotVisible, // no text — panel not open
+}
+
 /// Read `fishing_rod_region` text via OCR.
-/// Returns true when no rod is equipped ("Add a Pole" visible).
-/// Returns false when a rod is equipped (rod name visible) or on OCR failure.
-pub fn detect_fishing_rod(cfg: &FishingConfig) -> Result<bool> {
+pub fn detect_fishing_rod(cfg: &FishingConfig) -> Result<FishingRodArea> {
     let screenshot = capture_screen()?;
     let abs_region = resolve_region(cfg.window_origin, cfg.fishing_rod_region);
     let text = ocr_region(&screenshot, abs_region, "6");
     // eprintln!("[rod-area-ocr] text={text:?}");
-    Ok(text.contains("add"))
+    if text.contains("add") {
+        Ok(FishingRodArea::NoPole)
+    } else if text.is_empty() {
+        Ok(FishingRodArea::NotVisible)
+    } else {
+        Ok(FishingRodArea::HasPole)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

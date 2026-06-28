@@ -1,6 +1,6 @@
 use crate::bot::FishingState;
 use crate::config::FishingConfig;
-use crate::detector::{arrow_capture_region, capture_region, capture_screen, check_window_focus, detect_bait_position_from_crop, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, read_rod_use_button, resolve_region, RodUseButton};
+use crate::detector::{arrow_capture_region, capture_region, capture_screen, check_window_focus, detect_bait_position_from_crop, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, read_rod_use_button, resolve_region, FishingRodArea, RodUseButton};
 use core::module::{Module, ModuleContext};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -210,7 +210,7 @@ impl FishingModule {
                             let in_mode = detect_fishing_mode(&cfg).unwrap_or(false);
                             if !in_mode {
                                 *state_arc.lock().unwrap() = FishingState::EnteringFishingMode;
-                            } else if detect_fishing_rod(&cfg).unwrap_or(false) {
+                            } else if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NoPole)) {
                                 *state_arc.lock().unwrap() = FishingState::SelectingRod;
                             } else {
                                 *state_arc.lock().unwrap() = FishingState::Idle;
@@ -237,7 +237,7 @@ impl FishingModule {
                                 }
                             }
                             if confirmed {
-                                if detect_fishing_rod(&cfg).unwrap_or(false) {
+                                if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NoPole)) {
                                     *state_arc.lock().unwrap() = FishingState::SelectingRod;
                                 } else {
                                     *state_arc.lock().unwrap() = FishingState::Idle;
@@ -248,7 +248,7 @@ impl FishingModule {
                         }
                         FishingState::SelectingRod => {
                             eprintln!("[auto-fishing] SelectingRod: checking rod area");
-                            let rod_missing = detect_fishing_rod(&cfg).unwrap_or(false);
+                            let rod_missing = matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NoPole));
                             if rod_missing {
                                 eprintln!("[auto-fishing] No rod equipped, opening rod menu");
                                 let _ = input.press_key(&cfg.rod_slot_key);
@@ -320,23 +320,15 @@ impl FishingModule {
                                     }
                                     std::thread::sleep(Duration::from_millis(500));
 
-                                    let menu_open = matches!(
-                                        read_rod_use_button(&cfg),
-                                        Ok(RodUseButton::Using) | Ok(RodUseButton::Use)
-                                    );
-                                    if menu_open {
-                                        eprintln!("[auto-fishing] Failsafe: menu open — close, reopen, click");
-                                        let _ = input.press_key(&cfg.rod_slot_key);
-                                        std::thread::sleep(Duration::from_millis(1000));
-                                        let _ = input.press_key(&cfg.rod_slot_key);
-                                        std::thread::sleep(Duration::from_millis(1000));
-                                    } else {
-                                        eprintln!("[auto-fishing] Failsafe: menu closed — open, click");
-                                        let _ = input.press_key(&cfg.rod_slot_key);
-                                        std::thread::sleep(Duration::from_millis(1000));
+                                    for i in 0..10u32 {
+                                        let _ = input.click_mouse_left();
+                                        eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
+                                        std::thread::sleep(Duration::from_millis(300));
+                                        if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NotVisible)) {
+                                            eprintln!("[auto-fishing] Failsafe: rod area gone after {} clicks", i + 1);
+                                            break;
+                                        }
                                     }
-                                    let _ = input.click_mouse_left();
-                                    std::thread::sleep(Duration::from_millis(500));
 
                                     *state_arc.lock().unwrap() = FishingState::SelectingRod;
                                     continue;
@@ -352,11 +344,42 @@ impl FishingModule {
                                 continue;
                             }
                             // Rod still visible = cast did not land; retry from Idle.
-                            // if detect_fishing_rod(&cfg).unwrap_or(false) {
-                            //     eprintln!("[auto-fishing] WaitingBite: rod still visible, cast failed — retrying");
-                            //     *state_arc.lock().unwrap() = FishingState::SelectingRod;
-                            //     continue;
-                            // }
+                            if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::HasPole)) {
+                                waiting_bite_fail_count += 1;
+                                eprintln!("[auto-fishing] WaitingBite: rod still visible, cast failed — retrying");
+
+                                if waiting_bite_fail_count >= 3 {
+                                    eprintln!("[auto-fishing] WaitingBite: 3 consecutive cast failed — running failsafe");
+                                    waiting_bite_fail_count = 0;
+
+                                    focus_game_window(&window_id);
+                                    if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
+                                        cfg.window_origin = (wx, wy);
+                                        let cx = wx + ww as i32 / 2;
+                                        let cy = wy + wh as i32 / 2;
+                                        let _ = std::process::Command::new("xdotool")
+                                            .args(["mousemove", &cx.to_string(), &cy.to_string()])
+                                            .status();
+                                    }
+                                    std::thread::sleep(Duration::from_millis(500));
+
+                                    for i in 0..10u32 {
+                                        let _ = input.click_mouse_left();
+                                        eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
+                                        std::thread::sleep(Duration::from_millis(300));
+                                        if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NotVisible)) {
+                                            eprintln!("[auto-fishing] Failsafe: rod area gone after {} clicks", i + 1);
+                                            break;
+                                        }
+                                    }
+
+                                    *state_arc.lock().unwrap() = FishingState::SelectingRod;
+                                    continue;
+                                }
+
+                                *state_arc.lock().unwrap() = FishingState::Idle;
+                                continue;
+                            }
                             if crate::detector::detect_bite(&cfg).unwrap_or(false) {
                                 waiting_bite_fail_count = 0;
                                 let _ = input.click_mouse_left();
