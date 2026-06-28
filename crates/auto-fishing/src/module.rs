@@ -310,6 +310,14 @@ impl FishingModule {
                                     waiting_bite_fail_count = 0;
 
                                     focus_game_window(&window_id);
+                                    if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
+                                        cfg.window_origin = (wx, wy);
+                                        let cx = wx + ww as i32 / 2;
+                                        let cy = wy + wh as i32 / 2;
+                                        let _ = std::process::Command::new("xdotool")
+                                            .args(["mousemove", &cx.to_string(), &cy.to_string()])
+                                            .status();
+                                    }
                                     std::thread::sleep(Duration::from_millis(500));
 
                                     let menu_open = matches!(
@@ -317,16 +325,18 @@ impl FishingModule {
                                         Ok(RodUseButton::Using) | Ok(RodUseButton::Use)
                                     );
                                     if menu_open {
-                                        eprintln!("[auto-fishing] Failsafe: menu open — closing");
+                                        eprintln!("[auto-fishing] Failsafe: menu open — close, reopen, click");
+                                        let _ = input.press_key(&cfg.rod_slot_key);
+                                        std::thread::sleep(Duration::from_millis(1000));
                                         let _ = input.press_key(&cfg.rod_slot_key);
                                         std::thread::sleep(Duration::from_millis(1000));
                                     } else {
-                                        eprintln!("[auto-fishing] Failsafe: menu closed — open-close cycle");
-                                        let _ = input.press_key(&cfg.rod_slot_key);
-                                        std::thread::sleep(Duration::from_millis(1000));
+                                        eprintln!("[auto-fishing] Failsafe: menu closed — open, click");
                                         let _ = input.press_key(&cfg.rod_slot_key);
                                         std::thread::sleep(Duration::from_millis(1000));
                                     }
+                                    let _ = input.click_mouse_left();
+                                    std::thread::sleep(Duration::from_millis(500));
 
                                     *state_arc.lock().unwrap() = FishingState::SelectingRod;
                                     continue;
