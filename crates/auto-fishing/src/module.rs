@@ -144,6 +144,7 @@ impl FishingModule {
                 // 0 = Center, 1 = Left, 2 = Right.
                 let arrow_state = Arc::new(AtomicU8::new(0u8));
                 let mut arrow_thread: Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>)> = None;
+                let mut waiting_bite_fail_count: u32 = 0;
                 'outer: loop {
                     if stop_rx.try_recv().is_ok() {
                         break 'outer;
@@ -301,6 +302,36 @@ impl FishingModule {
                         }
                         FishingState::WaitingBite { cast_at } => {
                             if cast_at.elapsed() > Duration::from_millis(cfg.bite_timeout_ms) {
+                                waiting_bite_fail_count += 1;
+                                eprintln!("[auto-fishing] WaitingBite timeout #{waiting_bite_fail_count}");
+
+                                if waiting_bite_fail_count >= 3 {
+                                    eprintln!("[auto-fishing] WaitingBite: 3 consecutive timeouts — running failsafe");
+                                    waiting_bite_fail_count = 0;
+
+                                    focus_game_window(&window_id);
+                                    std::thread::sleep(Duration::from_millis(500));
+
+                                    let menu_open = matches!(
+                                        read_rod_use_button(&cfg),
+                                        Ok(RodUseButton::Using) | Ok(RodUseButton::Use)
+                                    );
+                                    if menu_open {
+                                        eprintln!("[auto-fishing] Failsafe: menu open — closing");
+                                        let _ = input.press_key(&cfg.rod_slot_key);
+                                        std::thread::sleep(Duration::from_millis(1000));
+                                    } else {
+                                        eprintln!("[auto-fishing] Failsafe: menu closed — open-close cycle");
+                                        let _ = input.press_key(&cfg.rod_slot_key);
+                                        std::thread::sleep(Duration::from_millis(1000));
+                                        let _ = input.press_key(&cfg.rod_slot_key);
+                                        std::thread::sleep(Duration::from_millis(1000));
+                                    }
+
+                                    *state_arc.lock().unwrap() = FishingState::SelectingRod;
+                                    continue;
+                                }
+
                                 // Re-check fishing mode on timeout; if not in mode (false positive
                                 // slipped through CheckingState), re-enter properly.
                                 if !detect_fishing_mode(&cfg).unwrap_or(true) {
@@ -317,6 +348,7 @@ impl FishingModule {
                             //     continue;
                             // }
                             if crate::detector::detect_bite(&cfg).unwrap_or(false) {
+                                waiting_bite_fail_count = 0;
                                 let _ = input.click_mouse_left();
                                 *state_arc.lock().unwrap() =
                                     FishingState::Reeling { started_at: Instant::now() };
