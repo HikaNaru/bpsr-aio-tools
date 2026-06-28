@@ -297,10 +297,10 @@ pub fn detect_fishing_rod(cfg: &FishingConfig) -> Result<FishingRodArea> {
     // eprintln!("[rod-area-ocr] text={text:?}");
     if text.contains("add") {
         Ok(FishingRodArea::NoPole)
-    } else if text.is_empty() {
-        Ok(FishingRodArea::NotVisible)
-    } else {
+    } else if text.contains("fishing") {
         Ok(FishingRodArea::HasPole)
+    } else {
+        Ok(FishingRodArea::NotVisible)
     }
 }
 

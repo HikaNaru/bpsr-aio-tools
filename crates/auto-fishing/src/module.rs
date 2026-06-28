@@ -192,15 +192,6 @@ impl FishingModule {
                                 eprintln!("[auto-fishing] CheckingState: fish caught screen still visible, retrying continue click");
                                 let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
                                 let _ = input.click_at(rx + rw / 2, ry + rh / 2);
-                                if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
-                                    cfg.window_origin = (wx, wy);
-                                    let cx = wx + ww as i32 / 2;
-                                    let cy = wy + wh as i32 / 2;
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["mousemove", &cx.to_string(), &cy.to_string()])
-                                        .status();
-                                }
-                                std::thread::sleep(Duration::from_millis(1000));
                                 *state_arc.lock().unwrap() = FishingState::Cooldown {
                                     until: Instant::now() + Duration::from_millis(2000),
                                 };
@@ -269,18 +260,7 @@ impl FishingModule {
                                 let _ = input.press_key(&cfg.rod_slot_key);
                                 std::thread::sleep(Duration::from_millis(1000));
                             }
-
-                            // Focus window and center cursor before casting.
-                            if let Some((id, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
-                                cfg.window_origin = (wx, wy);
-                                focus_game_window(&id);
-                                let cx = wx + ww as i32 / 2;
-                                let cy = wy + wh as i32 / 2;
-                                let _ = std::process::Command::new("xdotool")
-                                    .args(["mousemove", &cx.to_string(), &cy.to_string()])
-                                    .status();
-                            }
-                            std::thread::sleep(Duration::from_millis(1000));
+                            
                             *state_arc.lock().unwrap() = FishingState::Idle;
                         }
                         FishingState::Idle => {
@@ -310,6 +290,11 @@ impl FishingModule {
                                     waiting_bite_fail_count = 0;
 
                                     focus_game_window(&window_id);
+                                    std::thread::sleep(Duration::from_millis(500));
+
+                                    let _ = input.press_key(&cfg.rod_slot_key);
+                                    std::thread::sleep(Duration::from_millis(500));
+
                                     if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
                                         cfg.window_origin = (wx, wy);
                                         let cx = wx + ww as i32 / 2;
@@ -322,7 +307,7 @@ impl FishingModule {
 
                                     for i in 0..10u32 {
                                         let _ = input.click_mouse_left();
-                                        eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
+                                        // eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
                                         std::thread::sleep(Duration::from_millis(300));
                                         if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NotVisible)) {
                                             eprintln!("[auto-fishing] Failsafe: rod area gone after {} clicks", i + 1);
@@ -353,6 +338,11 @@ impl FishingModule {
                                     waiting_bite_fail_count = 0;
 
                                     focus_game_window(&window_id);
+                                    std::thread::sleep(Duration::from_millis(500));
+
+                                    let _ = input.press_key(&cfg.rod_slot_key);
+                                    std::thread::sleep(Duration::from_millis(500));
+
                                     if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
                                         cfg.window_origin = (wx, wy);
                                         let cx = wx + ww as i32 / 2;
@@ -365,7 +355,7 @@ impl FishingModule {
 
                                     for i in 0..10u32 {
                                         let _ = input.click_mouse_left();
-                                        eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
+                                        // eprintln!("[auto-fishing] Failsafe: LMB spam #{}", i + 1);
                                         std::thread::sleep(Duration::from_millis(300));
                                         if matches!(detect_fishing_rod(&cfg), Ok(FishingRodArea::NotVisible)) {
                                             eprintln!("[auto-fishing] Failsafe: rod area gone after {} clicks", i + 1);
@@ -373,7 +363,7 @@ impl FishingModule {
                                         }
                                     }
 
-                                    *state_arc.lock().unwrap() = FishingState::SelectingRod;
+                                    // *state_arc.lock().unwrap() = FishingState::SelectingRod;
                                     continue;
                                 }
 
@@ -565,15 +555,6 @@ impl FishingModule {
                             std::thread::sleep(Duration::from_millis(1000));
                             let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
                             let _ = input.click_at(rx + rw / 2, ry + rh / 2);
-                            if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
-                                cfg.window_origin = (wx, wy);
-                                let cx = wx + ww as i32 / 2;
-                                let cy = wy + wh as i32 / 2;
-                                let _ = std::process::Command::new("xdotool")
-                                    .args(["mousemove", &cx.to_string(), &cy.to_string()])
-                                    .status();
-                            }
-                            std::thread::sleep(Duration::from_millis(1000));
                             *state_arc.lock().unwrap() = FishingState::Cooldown {
                                 until: Instant::now() + Duration::from_millis(cfg.cooldown_ms),
                             };
