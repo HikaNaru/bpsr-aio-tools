@@ -134,9 +134,9 @@ impl Default for FishingConfig {
             bite_min_saturation: 0.6,
             bite_min_pixels:     20,
 
-            cast_delay_ms:   1500,
-            bite_timeout_ms: 30_000,
-            cooldown_ms:     500,
+            cast_delay_ms:   2000,
+            bite_timeout_ms: 20_000,
+            cooldown_ms:     3000,
 
             reel_hold_ms:           400,
             reel_pause_ms:          300,

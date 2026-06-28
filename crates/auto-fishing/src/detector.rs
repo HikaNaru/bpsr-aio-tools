@@ -194,16 +194,126 @@ pub fn detect_fishing_mode(cfg: &FishingConfig) -> Result<bool> {
     )
 }
 
-/// Scan `fishing_rod_region` for the rod slot indicator.
-/// Returns true when no rod is equipped (rod slot shows an add/empty indicator).
+/// Read text from an absolute screen region via tesseract OCR.
+/// Auto-detects dark/light background and produces black-on-white for tesseract.
+/// `psm`: tesseract page segmentation mode string (e.g. "6" = block, "7" = single line).
+/// Returns lowercase trimmed text, empty string on any failure.
+fn ocr_region(screenshot: &RgbaImage, abs_region: [i32; 4], psm: &str) -> String {
+    use std::io::Write;
+
+    let [rx, ry, rw, rh] = abs_region;
+    let img_w = screenshot.width() as i32;
+    let img_h = screenshot.height() as i32;
+    let x0 = rx.clamp(0, img_w - 1) as u32;
+    let y0 = ry.clamp(0, img_h - 1) as u32;
+    let x1 = (rx + rw).clamp(0, img_w) as u32;
+    let y1 = (ry + rh).clamp(0, img_h) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return String::new();
+    }
+    let cw = x1 - x0;
+    let ch = y1 - y0;
+
+    // Avg luma → detect bg type. Dark bg has light text; light bg has dark text.
+    let total = (cw * ch) as u64;
+    let mut luma_sum: u64 = 0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = screenshot.get_pixel(x, y);
+            luma_sum += (p[0] as u64 + p[1] as u64 + p[2] as u64) / 3;
+        }
+    }
+    let avg_luma = luma_sum / total;
+    let dark_bg = avg_luma < 128;
+
+    // Build 3× black-on-white mono image for tesseract.
+    const SCALE: u32 = 3;
+    let mut mono = image::GrayImage::new(cw * SCALE, ch * SCALE);
+    for sy in 0..ch {
+        for sx in 0..cw {
+            let p = screenshot.get_pixel(x0 + sx, y0 + sy);
+            let luma = ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8;
+            let is_text = if dark_bg { luma >= 160 } else { luma < 160 };
+            let val = if is_text { 0u8 } else { 255u8 };
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    mono.put_pixel(sx * SCALE + dx, sy * SCALE + dy, image::Luma([val]));
+                }
+            }
+        }
+    }
+
+    let mut png_bytes: Vec<u8> = Vec::new();
+    if mono
+        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .is_err()
+    {
+        return String::new();
+    }
+
+    let tessdata_dir = {
+        let local = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("tessdata");
+        if local.join("eng.traineddata").exists() { local }
+        else { std::path::PathBuf::from("/usr/share/tessdata") }
+    };
+
+    let mut child = match std::process::Command::new("tesseract")
+        .args(["stdin", "stdout", "--psm", psm, "--oem", "3",
+               "-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 /"])
+        .env("TESSDATA_PREFIX", &tessdata_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&png_bytes);
+    }
+
+    match child.wait_with_output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_lowercase(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Read `fishing_rod_region` text via OCR.
+/// Returns true when no rod is equipped ("Add a Pole" visible).
+/// Returns false when a rod is equipped (rod name visible) or on OCR failure.
 pub fn detect_fishing_rod(cfg: &FishingConfig) -> Result<bool> {
-    hue_count_region(
-        resolve_region(cfg.window_origin, cfg.fishing_rod_region),
-        cfg.fishing_rod_hue_center,
-        cfg.fishing_rod_hue_range,
-        cfg.fishing_rod_min_saturation,
-        cfg.fishing_rod_min_pixels,
-    )
+    let screenshot = capture_screen()?;
+    let abs_region = resolve_region(cfg.window_origin, cfg.fishing_rod_region);
+    let text = ocr_region(&screenshot, abs_region, "6");
+    // eprintln!("[rod-area-ocr] text={text:?}");
+    Ok(text.contains("add"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RodUseButton {
+    Using,
+    Use,
+    Unknown,
+}
+
+/// Read `rod_use_region` button text via OCR.
+/// Returns `Using` when rod is already active, `Use` when available to equip.
+pub fn read_rod_use_button(cfg: &FishingConfig) -> Result<RodUseButton> {
+    let screenshot = capture_screen()?;
+    let abs_region = resolve_region(cfg.window_origin, cfg.rod_use_region);
+    let text = ocr_region(&screenshot, abs_region, "7");
+    // eprintln!("[rod-use-ocr] text={text:?}");
+    if text.contains("using") {
+        Ok(RodUseButton::Using)
+    } else if text.contains("use") {
+        Ok(RodUseButton::Use)
+    } else {
+        Ok(RodUseButton::Unknown)
+    }
 }
 
 /// Returns true when the reeling tension bar is visible (colored zones present).
