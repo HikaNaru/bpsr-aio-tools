@@ -61,8 +61,12 @@ impl InputController {
     }
 
     /// Move cursor to absolute screen position then left-click.
+    /// Settle delay after the XTest move is required: `--sync` only syncs to the
+    /// X server, not the Wayland compositor/game, so an immediate ydotool click
+    /// can fire before the new pointer position is registered and silently miss.
     pub fn click_at(&mut self, x: i32, y: i32) -> Result<()> {
         xdo(&["mousemove", "--sync", &x.to_string(), &y.to_string()])?;
+        std::thread::sleep(Duration::from_millis(200));
         ydo(&["click", "0xC0"])?;
         Ok(())
     }

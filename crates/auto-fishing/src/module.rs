@@ -138,6 +138,9 @@ impl FishingModule {
                 let mut held_steer_key: Option<String> = None;
                 let mut bar_absent_streak: u32 = 0;
                 let mut pct_zero_streak: u32 = 0;
+                // Last accepted tension reading; clamps per-tick OCR drops so a single
+                // bad read can't report tension falling straight from 100% to 0%.
+                let mut last_valid_pct: f32 = 0.0;
                 // True while tension is 100%; clicks instead of hold until < 70%.
                 let mut tension_cooldown = false;
                 // Arrow detection thread — spawned on Reeling entry, stopped on exit.
@@ -190,8 +193,20 @@ impl FishingModule {
                             // Click continue again and wait longer before re-checking.
                             if detect_fish_caught(&cfg).unwrap_or(false) {
                                 eprintln!("[auto-fishing] CheckingState: fish caught screen still visible, retrying continue click");
+
+                                if let Some((_, wx, wy, ww, wh)) = find_game_window(&cfg.game_window_title) {
+                                    cfg.window_origin = (wx, wy);
+                                    let cx = wx + ww as i32 / 2;
+                                    let cy = wy + wh as i32 / 2;
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["mousemove", &cx.to_string(), &cy.to_string()])
+                                        .status();
+                                }
+                                std::thread::sleep(Duration::from_millis(1000));
+
                                 let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
                                 let _ = input.click_at(rx + rw / 2, ry + rh / 2);
+
                                 *state_arc.lock().unwrap() = FishingState::Cooldown {
                                     until: Instant::now() + Duration::from_millis(2000),
                                 };
@@ -386,6 +401,7 @@ impl FishingModule {
                             if arrow_thread.is_none() {
                                 bar_absent_streak = 0;
                                 pct_zero_streak = 0;
+                                last_valid_pct = 0.0;
                                 let (atx, arx) = std::sync::mpsc::channel::<()>();
                                 let astate = Arc::clone(&arrow_state);
                                 let acfg = cfg.clone();
@@ -414,6 +430,27 @@ impl FishingModule {
 
                             let elapsed = started_at.elapsed();
 
+                            // Absolute last-resort failsafe: if reeling drags on far past a
+                            // normal catch, force a state re-check instead of hanging forever.
+                            if elapsed > Duration::from_millis(cfg.reel_timeout_ms) {
+                                if let Some(ref key) = held_steer_key { let _ = input.key_up(key); }
+                                held_steer_key = None;
+                                if lmb_held { let _ = input.mouse_up(); lmb_held = false; }
+                                tension_cooldown = false;
+                                tension_pct_arc.store(0, Ordering::Relaxed);
+                                eprintln!("[auto-fishing] STOPPED: reel_timeout_ms ({}) exceeded", cfg.reel_timeout_ms);
+                                std::thread::sleep(Duration::from_millis(300));
+                                if detect_fish_caught(&cfg).unwrap_or(false) {
+                                    *state_arc.lock().unwrap() = FishingState::FishCaught;
+                                } else {
+                                    failed_count_arc.fetch_add(1, Ordering::Relaxed);
+                                    *state_arc.lock().unwrap() = FishingState::Cooldown {
+                                        until: Instant::now() + Duration::from_millis(cfg.cooldown_ms),
+                                    };
+                                }
+                                continue;
+                            }
+
                             // One screenshot per main-loop iteration covers tension OCR,
                             // fish-caught, and tension-bar checks. Arrow is handled separately
                             // by the arrow thread at 20ms cadence.
@@ -422,12 +459,23 @@ impl FishingModule {
                                 Err(_) => { std::thread::sleep(Duration::from_millis(50)); continue; }
                             };
 
-                            // Measure and publish tension percentage.
-                            let pct = measure_tension_pct_on_image(&cfg, &screenshot);
+                            // Measure tension percentage. Clamp implausible drops (single bad
+                            // OCR read reporting e.g. 100%→0%) — tension only falls gradually.
+                            const MAX_TENSION_DROP_PER_TICK: f32 = 15.0;
+                            let raw_pct = measure_tension_pct_on_image(&cfg, &screenshot);
+                            let pct = if raw_pct < last_valid_pct - MAX_TENSION_DROP_PER_TICK {
+                                (last_valid_pct - MAX_TENSION_DROP_PER_TICK).max(0.0)
+                            } else {
+                                raw_pct
+                            };
+                            last_valid_pct = pct;
                             tension_pct_arc.store(pct.round() as u32, Ordering::Relaxed);
                             // eprintln!("[auto-fishing] tension: {pct:.0}%");
                             if elapsed > Duration::from_millis(2000) {
-                                if pct == 0.0 { pct_zero_streak += 1; } else { pct_zero_streak = 0; }
+                                // Leaky counter: a single non-zero blip only costs a few
+                                // ticks of progress instead of wiping the streak outright,
+                                // so noisy OCR near an escape can't block the exit forever.
+                                if pct == 0.0 { pct_zero_streak += 1; } else { pct_zero_streak = pct_zero_streak.saturating_sub(3); }
                             }
 
                             // Tension gate: switch to click mode at 100%, resume hold at <70%.
@@ -478,7 +526,8 @@ impl FishingModule {
                                 if !detect_tension_bar_on_image(&cfg, &screenshot) {
                                     bar_absent_streak += 1;
                                 } else {
-                                    bar_absent_streak = 0;
+                                    // Leaky counter — see pct_zero_streak comment above.
+                                    bar_absent_streak = bar_absent_streak.saturating_sub(3);
                                 }
                                 let should_exit = bar_absent_streak >= 10 || pct_zero_streak >= 30;
                                 if should_exit {
@@ -552,7 +601,7 @@ impl FishingModule {
                         FishingState::FishCaught => {
                             eprintln!("[auto-fishing] Fish caught! Clicking continue");
                             fish_count_arc.fetch_add(1, Ordering::Relaxed);
-                            std::thread::sleep(Duration::from_millis(1000));
+                            std::thread::sleep(Duration::from_millis(3000));
                             let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
                             let _ = input.click_at(rx + rw / 2, ry + rh / 2);
                             *state_arc.lock().unwrap() = FishingState::Cooldown {

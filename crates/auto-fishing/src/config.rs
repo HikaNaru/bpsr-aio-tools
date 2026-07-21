@@ -140,7 +140,7 @@ impl Default for FishingConfig {
 
             reel_hold_ms:           400,
             reel_pause_ms:          300,
-            reel_timeout_ms:        60_000,
+            reel_timeout_ms:        120_000,
 
             // Left/right arrow indicators — close to bite detect region [700,350,200,200]
             left_arrow_region:      [610, 400, 180, 100],
