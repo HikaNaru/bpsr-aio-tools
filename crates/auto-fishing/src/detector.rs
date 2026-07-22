@@ -304,6 +304,19 @@ pub fn detect_fishing_rod(cfg: &FishingConfig) -> Result<FishingRodArea> {
     }
 }
 
+/// Detect "Click anywhere to close" text in `monthly_reward_region`. Captures own screenshot.
+pub fn detect_monthly_reward_popup(cfg: &FishingConfig) -> Result<bool> {
+    let screenshot = capture_screen()?;
+    Ok(detect_monthly_reward_popup_on_image(cfg, &screenshot))
+}
+
+/// Same check against an already-captured screenshot (avoid double capture).
+pub fn detect_monthly_reward_popup_on_image(cfg: &FishingConfig, screenshot: &RgbaImage) -> bool {
+    let abs_region = resolve_region(cfg.window_origin, cfg.monthly_reward_region);
+    let text = ocr_region(screenshot, abs_region, "7");
+    text.contains("click") && text.contains("close")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RodUseButton {
     Using,

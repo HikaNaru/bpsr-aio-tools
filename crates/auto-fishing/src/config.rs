@@ -78,6 +78,12 @@ pub struct FishingConfig {
     pub fish_caught_min_pixels: u32,
     /// Screen region [ox,oy,w,h] of the "Continue fishing" button (used for both detect + click)
     pub fish_caught_region: [i32; 4],
+
+    // --- Monthly reward popup ---
+    /// Region [ox,oy,w,h] of bottom-center "Click anywhere to close" text.
+    pub monthly_reward_region: [i32; 4],
+    /// Min ms between OCR checks (avoid spawning tesseract every tick).
+    pub monthly_reward_check_interval_ms: u64,
 }
 
 impl FishingConfig {
@@ -163,6 +169,9 @@ impl Default for FishingConfig {
             fish_caught_threshold:  180,
             fish_caught_min_pixels: 500,
             fish_caught_region:    [1200, 785, 250, 60],
+
+            monthly_reward_region:              [600, 850, 400, 40],
+            monthly_reward_check_interval_ms:   60_000,
         }
     }
 }

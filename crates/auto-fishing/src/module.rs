@@ -1,6 +1,6 @@
 use crate::bot::FishingState;
 use crate::config::FishingConfig;
-use crate::detector::{arrow_capture_region, capture_region, capture_screen, check_window_focus, detect_bait_position_from_crop, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, read_rod_use_button, resolve_region, FishingRodArea, RodUseButton};
+use crate::detector::{arrow_capture_region, capture_region, capture_screen, check_window_focus, detect_bait_position_from_crop, detect_fish_caught, detect_fish_caught_on_image, detect_fishing_mode, detect_fishing_rod, detect_monthly_reward_popup, detect_tension_bar_on_image, find_game_window, focus_game_window, measure_tension_pct_on_image, read_rod_use_button, resolve_region, FishingRodArea, RodUseButton};
 use core::module::{Module, ModuleContext};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,7 @@ fn scale_regions(cfg: &mut FishingConfig, from: (u32, u32), to: (u32, u32)) {
     sr(&mut cfg.tension_bar_region, sx, sy);
     sr(&mut cfg.tension_pct_region, sx, sy);
     sr(&mut cfg.fish_caught_region, sx, sy);
+    sr(&mut cfg.monthly_reward_region, sx, sy);
 }
 
 impl FishingModule {
@@ -148,6 +149,7 @@ impl FishingModule {
                 let arrow_state = Arc::new(AtomicU8::new(0u8));
                 let mut arrow_thread: Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>)> = None;
                 let mut waiting_bite_fail_count: u32 = 0;
+                let mut last_reward_check = Instant::now() - Duration::from_secs(9999);
                 'outer: loop {
                     if stop_rx.try_recv().is_ok() {
                         break 'outer;
@@ -169,6 +171,25 @@ impl FishingModule {
                         }
                         std::thread::sleep(Duration::from_millis(200));
                         continue;
+                    }
+
+                    // Opportunistic check, independent of current state — the monthly
+                    // reward popup can interrupt any state (Idle, WaitingBite, Reeling...).
+                    // Time-gated since OCR spawns a tesseract subprocess per check.
+                    if last_reward_check.elapsed() >= Duration::from_millis(cfg.monthly_reward_check_interval_ms) {
+                        last_reward_check = Instant::now();
+                        if detect_monthly_reward_popup(&cfg).unwrap_or(false) {
+                            eprintln!("[auto-fishing] Monthly reward popup detected — closing");
+                            for i in 0..15u32 {
+                                let _ = input.click_mouse_left();
+                                std::thread::sleep(Duration::from_millis(300));
+                                if !detect_monthly_reward_popup(&cfg).unwrap_or(true) {
+                                    eprintln!("[auto-fishing] Monthly reward popup closed after {} clicks", i + 1);
+                                    break;
+                                }
+                            }
+                            continue 'outer;
+                        }
                     }
 
                     let current = state_arc.lock().unwrap().clone();
@@ -601,7 +622,7 @@ impl FishingModule {
                         FishingState::FishCaught => {
                             eprintln!("[auto-fishing] Fish caught! Clicking continue");
                             fish_count_arc.fetch_add(1, Ordering::Relaxed);
-                            std::thread::sleep(Duration::from_millis(3000));
+                            std::thread::sleep(Duration::from_millis(1000));
                             let [rx, ry, rw, rh] = resolve_region(cfg.window_origin, cfg.fish_caught_region);
                             let _ = input.click_at(rx + rw / 2, ry + rh / 2);
                             *state_arc.lock().unwrap() = FishingState::Cooldown {
@@ -704,6 +725,8 @@ fn capture_debug_preview(
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.left_arrow_region),  [255, 80, 200, 255]);
     // Right arrow region (pink)
     draw_rect_border(&mut img, resolve_region(draw_origin, cfg.right_arrow_region), [255, 160, 220, 255]);
+    // Monthly reward popup region (yellow-green)
+    draw_rect_border(&mut img, resolve_region(draw_origin, cfg.monthly_reward_region), [180, 255, 0, 255]);
 
     let save_path = {
         let mut p = std::env::current_dir()
@@ -1048,6 +1071,20 @@ impl Module for FishingModule {
                         ui.horizontal(|ui| { for v in &mut self.config.fish_caught_region { dv(v, ui); } });
                     });
 
+                    // Monthly Reward Popup
+                    ui.collapsing("Monthly Reward Popup", |ui| {
+                        let dv = |v: &mut i32, ui: &mut egui::Ui| {
+                            ui.add(egui::DragValue::new(v).range(-200..=3840));
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Check interval (ms):");
+                            ui.add(egui::DragValue::new(&mut self.config.monthly_reward_check_interval_ms).range(500..=60_000));
+                        });
+                        ui.separator();
+                        ui.label("\"Click anywhere to close\" text region [ox, oy, w, h]:");
+                        ui.horizontal(|ui| { for v in &mut self.config.monthly_reward_region { dv(v, ui); } });
+                    });
+
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("💾 Save Config").clicked() {
@@ -1081,6 +1118,7 @@ impl Module for FishingModule {
                 ui.colored_label(egui::Color32::from_rgb( 50, 180, 255), "■ Continue btn");
                 ui.colored_label(egui::Color32::from_rgb(255,  80, 200), "■ Left arrow");
                 ui.colored_label(egui::Color32::from_rgb(255, 160, 220), "■ Right arrow");
+                ui.colored_label(egui::Color32::from_rgb(180, 255,   0), "■ Monthly reward");
             });
             ui.horizontal(|ui| {
                 if ui.button("Capture preview").clicked() {
