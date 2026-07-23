@@ -114,6 +114,33 @@ pub struct SkillEntry {
     pub cool_time: f32,
     #[serde(rename = "SkillType", default)]
     pub skill_type: i32,
+    /// Slot positions this skill can occupy in the loadout bar. Positions 7/8 = Imagines.
+    #[serde(rename = "SlotPositionId", default)]
+    pub slot_position_id: Vec<i32>,
+}
+
+// ── Equip / Item Tables ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EquipEntry {
+    #[serde(rename = "Id")]
+    pub id: i32,
+    #[serde(rename = "EquipPart", default)]
+    pub equip_part: i32,
+    #[serde(rename = "EquipGs", default)]
+    pub equip_gs: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ItemEntry {
+    #[serde(rename = "Id")]
+    pub id: i32,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Icon", default)]
+    pub icon: String,
+    #[serde(rename = "Quality", default)]
+    pub quality: i32,
 }
 
 // ── Monster Table ────────────────────────────────────────────────────────────
@@ -163,6 +190,8 @@ pub struct DataTables {
     pub monsters: HashMap<String, MonsterEntry>,
     pub dummies: HashMap<String, DummyEntry>,
     pub scenes: HashMap<String, SceneEntry>,
+    pub equips: HashMap<String, EquipEntry>,
+    pub items: HashMap<String, ItemEntry>,
     /// AppStrings.en.json — flat key→value localization map
     pub strings: HashMap<String, String>,
 }
@@ -190,6 +219,10 @@ impl DataTables {
         if m.name.is_empty() { None } else { Some(m.name.as_str()) }
     }
 
+    pub fn monster_type(&self, id: u32) -> Option<i32> {
+        self.monsters.get(&id.to_string()).map(|m| m.monster_type)
+    }
+
     pub fn dummy_name(&self, id: u32) -> Option<&str> {
         let d = self.dummies.get(&id.to_string())?;
         if d.name.is_empty() { None } else { Some(d.name.as_str()) }
@@ -210,6 +243,27 @@ impl DataTables {
         if e.effect_name.is_empty() { None } else { Some(e.effect_name.as_str()) }
     }
 
+    pub fn item_name(&self, id: i32) -> Option<&str> {
+        let it = self.items.get(&id.to_string())?;
+        if it.name.is_empty() { None } else { Some(it.name.as_str()) }
+    }
+
+    pub fn item_icon(&self, id: i32) -> Option<&str> {
+        let it = self.items.get(&id.to_string())?;
+        if it.icon.is_empty() { None } else { Some(it.icon.as_str()) }
+    }
+
+    pub fn equip_part(&self, id: i32) -> Option<i32> {
+        self.equips.get(&id.to_string()).map(|e| e.equip_part)
+    }
+
+    /// True if the skill occupies an "Imagine" slot (positions 7/8 in the loadout bar).
+    pub fn skill_is_imagine(&self, id: u32) -> bool {
+        self.skills.get(&id.to_string())
+            .map(|s| s.slot_position_id.iter().any(|&p| p == 7 || p == 8))
+            .unwrap_or(false)
+    }
+
     pub fn string<'a>(&'a self, key: &'a str) -> &'a str {
         self.strings.get(key).map(|s| s.as_str()).unwrap_or(key)
     }
@@ -225,6 +279,8 @@ pub static DATA: Lazy<DataTables> = Lazy::new(|| {
         monsters:        load_table("MonsterTable.json"),
         dummies:         load_table("DummyTable.json"),
         scenes:          load_table("SceneTable.json"),
+        equips:          load_table("EquipTable.json"),
+        items:           load_table("ItemTable.json"),
         strings:         load_flat("AppStrings.en.json"),
     }
 });

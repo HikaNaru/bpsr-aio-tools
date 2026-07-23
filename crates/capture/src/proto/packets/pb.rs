@@ -149,6 +149,44 @@ pub struct SyncDamageInfo {
     pub top_summoner_id: i64,
 }
 
+/// AttrShieldList (attr id 60050) raw bytes decode to a back-to-back sequence
+/// of these length-delimited messages (one per active shield on the entity).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShieldInfo {
+    #[prost(int64, tag = "1")]
+    pub uuid: i64,
+    #[prost(int32, tag = "2")]
+    pub shield_type: i32,
+    #[prost(int64, tag = "3")]
+    pub value: i64,
+    #[prost(int64, tag = "4")]
+    pub initial_value: i64,
+    #[prost(int64, tag = "5")]
+    pub max_value: i64,
+}
+
+/// AttrEquipData (attr id 200) raw bytes decode to a back-to-back sequence
+/// of these length-delimited messages (one per equipped item slot).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipNine {
+    #[prost(int32, tag = "1")]
+    pub slot: i32,
+    #[prost(int32, tag = "2")]
+    pub equip_id: i32,
+}
+
+/// AttrSkillLevelIdList (attr id 116) raw bytes decode to a back-to-back
+/// sequence of these length-delimited messages (one per learned skill).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SkillLevelInfo {
+    #[prost(int32, tag = "1")]
+    pub skill_id: i32,
+    #[prost(int32, tag = "2")]
+    pub current_level: i32,
+    #[prost(int32, tag = "3")]
+    pub remodel_level: i32,
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SyncNearDeltaInfo {
     #[prost(message, repeated, tag = "1")]
@@ -309,12 +347,53 @@ pub struct DungeonFlowInfo {
     pub play_time: i32,
 }
 
+/// One entry of a DungeonTarget's TargetData map — an objective's progress.
+/// ZDPS treats `complete==0 && nums==0` (a fresh objective) following a
+/// previously-completed target as a phase-transition signal.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DungeonTargetData {
+    #[prost(int32, tag = "1")]
+    pub target_id: i32,
+    #[prost(int32, tag = "2")]
+    pub nums: i32,
+    #[prost(int32, tag = "3")]
+    pub complete: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DungeonTarget {
+    #[prost(map = "int32, message", tag = "1")]
+    pub target_data: std::collections::HashMap<i32, DungeonTargetData>,
+}
+
+/// Explicit phase-id field. Decoded for instrumentation — ZDPS itself never
+/// reads this field anywhere in its own logic, so its reliability for this
+/// game's dungeons is unverified; log it alongside DungeonTarget until a
+/// live capture confirms whether it changes meaningfully.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DungeonPhaseData {
+    #[prost(int32, tag = "1")]
+    pub r#type: i32,
+    #[prost(int32, tag = "2")]
+    pub phase_id: i32,
+    #[prost(int32, tag = "3")]
+    pub begin_time: i32,
+    #[prost(int32, tag = "4")]
+    pub phase_time: i32,
+    #[prost(int32, tag = "5")]
+    pub end_time: i32,
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DungeonSyncData {
     #[prost(int64, tag = "1")]
     pub scene_uuid: i64,
     #[prost(message, optional, tag = "2")]
     pub flow_info: Option<DungeonFlowInfo>,
+    #[prost(message, optional, tag = "4")]
+    pub target: Option<DungeonTarget>,
+    #[prost(message, optional, tag = "25")]
+    pub dungeon_phase_data: Option<DungeonPhaseData>,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]

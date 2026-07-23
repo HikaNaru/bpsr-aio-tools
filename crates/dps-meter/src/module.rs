@@ -1,5 +1,5 @@
 use crate::dps_state::DpsState;
-use crate::encounter::Encounter;
+use crate::encounter::{Encounter, EncounterOutcome};
 use crate::meter::{PlayerMeter, SkillStat};
 use core::{
     module::{Module, ModuleContext},
@@ -48,7 +48,18 @@ pub struct DpsMeterModule {
     state:            DpsState,
     names:            HashMap<EntityId, String>,
     classes:          HashMap<EntityId, u32>,
+    monster_types:    HashMap<EntityId, i32>,
+    is_player:        HashMap<EntityId, bool>,
     stats_cache:      HashMap<EntityId, CharStats>,
+    dead_players:     std::collections::HashSet<EntityId>,
+    shield_seen:      HashMap<EntityId, std::collections::HashSet<i64>>,
+    gear_cache:       HashMap<EntityId, Vec<game::event::EquipSlot>>,
+    loadout_cache:    HashMap<EntityId, Vec<game::event::SkillLoadoutEntry>>,
+    // Phase-boundary detection (see plan Milestone 5 remaining sub-task).
+    target_progress:      HashMap<i32, (i32, i32)>, // target_id -> (nums, complete)
+    completed_targets:    std::collections::HashSet<i32>,
+    current_phase_target: Option<i32>,
+    last_phase_id:        Option<i32>,
     pending:          Vec<GameEvent>,
     selected_enc:     Option<usize>,
     selected_player:  Option<EntityId>,
@@ -58,6 +69,7 @@ pub struct DpsMeterModule {
     current_zone_id:  Option<u32>,
     store:            EncounterStore,
     rank_mode:        u8,  // 0=DPS 1=Taken 2=Healing
+    players_only:     bool,
 
     // Benchmark
     bench_config:    BenchmarkConfig,
@@ -74,7 +86,17 @@ impl DpsMeterModule {
             state:           DpsState::new(encounter_timeout_secs),
             names:           HashMap::new(),
             classes:         HashMap::new(),
+            monster_types:   HashMap::new(),
+            is_player:       HashMap::new(),
             stats_cache:     HashMap::new(),
+            dead_players:    std::collections::HashSet::new(),
+            shield_seen:     HashMap::new(),
+            gear_cache:      HashMap::new(),
+            loadout_cache:   HashMap::new(),
+            target_progress:      HashMap::new(),
+            completed_targets:    std::collections::HashSet::new(),
+            current_phase_target: None,
+            last_phase_id:        None,
             pending:         Vec::new(),
             selected_enc:    None,
             selected_player: None,
@@ -84,6 +106,7 @@ impl DpsMeterModule {
             current_zone_id: None,
             store:           EncounterStore::open(),
             rank_mode:       0,
+            players_only:    false,
             bench_config:    BenchmarkConfig::default(),
             bench_active:    false,
             bench_start:     None,
@@ -95,7 +118,7 @@ impl DpsMeterModule {
 
     fn bench_start_encounter(&mut self) {
         self.state.finish_active();
-        self.state.active = Some(Encounter::new());
+        self.state.active = Some(Encounter::new(self.current_zone.clone(), self.current_zone_id.unwrap_or(0)));
         self.bench_start = Some(Instant::now());
         self.bench_target = None;
     }
@@ -115,20 +138,21 @@ impl DpsMeterModule {
             let mut crit_count = 0u64;
             let mut all_skills: HashMap<u32, SkillStat> = HashMap::new();
             for p in enc.players.values() {
-                hit_count  += p.hit_count;
-                crit_count += p.crit_count;
+                hit_count  += p.hit_count();
+                crit_count += p.crit_count();
                 for (id, sk) in &p.skill_breakdown {
                     let e = all_skills.entry(*id).or_insert_with(|| SkillStat {
                         skill_id: *id, ..Default::default()
                     });
-                    e.total_dmg += sk.total_dmg;
-                    e.hits      += sk.hits;
-                    e.crits     += sk.crits;
-                    if sk.max_hit > e.max_hit { e.max_hit = sk.max_hit; }
+                    e.stats.total += sk.stats.total;
+                    e.stats.hits  += sk.stats.hits;
+                    e.stats.crit_hits += sk.stats.crit_hits;
+                    e.stats.crit_lucky_hits += sk.stats.crit_lucky_hits;
+                    if sk.stats.max_hit > e.stats.max_hit { e.stats.max_hit = sk.stats.max_hit; }
                 }
             }
             let mut skills: Vec<SkillStat> = all_skills.into_values().collect();
-            skills.sort_by(|a, b| b.total_dmg.cmp(&a.total_dmg));
+            skills.sort_by(|a, b| b.stats.total.cmp(&a.stats.total));
 
             self.bench_result = Some(BenchResult {
                 duration_secs: duration,
@@ -149,8 +173,27 @@ impl DpsMeterModule {
         self.pending.push(event);
     }
 
+    /// If every known player participating in the active encounter is currently
+    /// dead, tag it Failed and finish it (auto-stop on party wipe).
+    fn check_wipe(&mut self) {
+        let party_all_dead = self.state.active.as_ref().is_some_and(|enc| {
+            let mut party = enc.players.keys()
+                .filter(|id| self.is_player.get(id).copied().unwrap_or(false))
+                .peekable();
+            party.peek().is_some() && party.all(|id| self.dead_players.contains(id))
+        });
+        if party_all_dead {
+            if let Some(enc) = &mut self.state.active {
+                enc.outcome = EncounterOutcome::Failed;
+            }
+            self.state.finish_active();
+        }
+    }
+
     fn save_encounter(&self, enc: &Encounter) {
-        let saved = to_saved_encounter(enc, &self.current_zone, &self.classes, &self.stats_cache);
+        let saved = to_saved_encounter(
+            enc, &self.classes, &self.monster_types, &self.stats_cache, &self.is_player, &self.gear_cache, &self.loadout_cache,
+        );
         let store = self.store.clone();
         std::thread::spawn(move || {
             if let Err(e) = store.save(&saved) {
@@ -163,7 +206,7 @@ impl DpsMeterModule {
 impl Module for DpsMeterModule {
     fn id(&self)   -> &'static str { "dps-meter" }
     fn name(&self) -> &str         { "DPS Meter" }
-    fn icon(&self) -> &str         { "📊" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::CHART_BAR }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
@@ -175,13 +218,17 @@ impl Module for DpsMeterModule {
 
         for event in events {
             match &event {
-                GameEvent::EntityName { id, name, class } => {
+                GameEvent::EntityName { id, name, class, monster_type, is_player } => {
                     if !name.is_empty() {
                         self.names.insert(*id, name.clone());
                     }
                     if let Some(c) = class {
                         self.classes.insert(*id, *c);
                     }
+                    if let Some(mt) = monster_type {
+                        self.monster_types.insert(*id, *mt);
+                    }
+                    self.is_player.insert(*id, *is_player);
                     if let Some(enc) = &mut self.state.active {
                         if let Some(meter) = enc.players.get_mut(id) {
                             if !name.is_empty() { meter.player_name = name.clone(); }
@@ -196,10 +243,61 @@ impl Module for DpsMeterModule {
                 GameEvent::EntityDespawn { id } => {
                     self.names.remove(id);
                     self.classes.remove(id);
+                    self.monster_types.remove(id);
+                    self.is_player.remove(id);
                     self.stats_cache.remove(id);
+                    self.dead_players.remove(id);
+                    self.shield_seen.remove(id);
+                    self.gear_cache.remove(id);
+                    self.loadout_cache.remove(id);
                 }
                 GameEvent::EntityStats { id, stats } => {
+                    let prev_state = self.stats_cache.get(id).and_then(|s| s.actor_state);
                     self.stats_cache.entry(*id).or_default().merge(stats);
+                    let new_state = self.stats_cache.get(id).and_then(|s| s.actor_state);
+                    if let Some(new_state) = new_state {
+                        let was_dead = prev_state == Some(game::entity::ACTOR_STATE_DEAD);
+                        let now_dead = new_state == game::entity::ACTOR_STATE_DEAD;
+                        if now_dead && !was_dead {
+                            self.dead_players.insert(*id);
+                            if self.is_player.get(id).copied().unwrap_or(false) {
+                                let names = &self.names;
+                                if let Some(enc) = &mut self.state.active {
+                                    enc.record_death(*id, |eid| {
+                                        names.get(&eid).cloned()
+                                            .unwrap_or_else(|| format!("Entity {:x}", eid.0))
+                                    });
+                                }
+                                self.check_wipe();
+                            }
+                        } else if !now_dead && was_dead {
+                            self.dead_players.remove(id);
+                        }
+                    }
+                }
+                GameEvent::ShieldList { id, shields } => {
+                    let seen = self.shield_seen.entry(*id).or_default();
+                    let mut new_gain = 0u64;
+                    for s in shields {
+                        if seen.insert(s.uuid) {
+                            new_gain += s.initial_value.max(0) as u64;
+                        }
+                    }
+                    if new_gain > 0 {
+                        let names = &self.names;
+                        if let Some(enc) = &mut self.state.active {
+                            enc.apply_shield_gain(*id, new_gain, |eid| {
+                                names.get(&eid).cloned()
+                                    .unwrap_or_else(|| format!("Entity {:x}", eid.0))
+                            });
+                        }
+                    }
+                }
+                GameEvent::EquipData { id, slots } => {
+                    self.gear_cache.insert(*id, slots.clone());
+                }
+                GameEvent::SkillLoadout { id, skills } => {
+                    self.loadout_cache.insert(*id, skills.clone());
                 }
                 GameEvent::ZoneChange { zone_id, zone_name } => {
                     let actually_changed = Some(*zone_id) != self.current_zone_id;
@@ -212,16 +310,62 @@ impl Module for DpsMeterModule {
                         if self.pinned_player.is_none() {
                             self.selected_player = None;
                         }
+                        // New zone/instance — stale objective progress from the
+                        // previous dungeon must not leak into phase detection here.
+                        self.target_progress.clear();
+                        self.completed_targets.clear();
+                        self.current_phase_target = None;
+                        self.last_phase_id = None;
                     }
                 }
                 GameEvent::DungeonState { .. } => {
                     self.state.apply_state_event(&event);
                 }
+                GameEvent::DungeonPhaseSignal { targets, phase_id } => {
+                    if *phase_id != self.last_phase_id {
+                        tracing::info!("dungeon phase_id changed: {:?} -> {:?} (unverified signal, logged for capture analysis)", self.last_phase_id, phase_id);
+                        self.last_phase_id = *phase_id;
+                    }
+                    for t in targets {
+                        tracing::debug!("dungeon target {} nums={} complete={}", t.target_id, t.nums, t.complete);
+                        let is_new_objective = t.complete == 0 && t.nums == 0;
+                        if is_new_objective
+                            && self.current_phase_target != Some(t.target_id)
+                            && !self.completed_targets.is_empty()
+                        {
+                            if let Some(enc) = &mut self.state.active {
+                                let phase_name = format!("Phase {}", enc.phases.len() + 2);
+                                enc.push_phase(phase_name);
+                            }
+                            self.current_phase_target = Some(t.target_id);
+                        } else if self.current_phase_target.is_none() {
+                            self.current_phase_target = Some(t.target_id);
+                        }
+                        if t.complete == 1 {
+                            self.completed_targets.insert(t.target_id);
+                        }
+                        self.target_progress.insert(t.target_id, (t.nums, t.complete));
+                    }
+                }
                 GameEvent::Heal(h) => {
                     if self.names.contains_key(&h.source_id) {
+                        // Overheal: target's cached HP already reflects this same delta's
+                        // attribute update (attrs are applied before skill_effects per-delta),
+                        // matching ZDPS's live-read-at-heal-time semantics.
+                        let overheal = self.stats_cache.get(&h.target_id).and_then(|s| {
+                            match (s.hp, s.max_hp) {
+                                (Some(hp), Some(max))
+                                    if max > 0 && hp >= 0 && hp <= max && hp + h.damage as i64 > max =>
+                                {
+                                    let effective = (max - hp).max(0) as u64;
+                                    Some(h.damage.saturating_sub(effective))
+                                }
+                                _ => None,
+                            }
+                        }).unwrap_or(0);
                         let names = &self.names;
                         if let Some(enc) = &mut self.state.active {
-                            enc.apply_heal(h.source_id, h.damage, |id| {
+                            enc.apply_heal(h, overheal, |id| {
                                 names.get(&id).cloned()
                                     .unwrap_or_else(|| format!("Entity {:x}", id.0))
                             });
@@ -253,14 +397,14 @@ impl Module for DpsMeterModule {
                         }
                     }
                     let names = &self.names;
-                    self.state.apply_event(&event, |id| {
+                    self.state.apply_event(&event, &self.current_zone, self.current_zone_id.unwrap_or(0), |id| {
                         names.get(&id).cloned()
                             .unwrap_or_else(|| format!("Entity {:x}", id.0))
                     });
                     // Track damage taken for known players
                     if names.contains_key(&c.target_id) {
                         if let Some(enc) = &mut self.state.active {
-                            enc.apply_taken(c.target_id, c.damage);
+                            enc.apply_taken(c);
                         }
                     }
                 }
@@ -285,7 +429,7 @@ impl Module for DpsMeterModule {
                 && !ctx.config.discord_webhook_url.is_empty()
                 && enc.players.len() >= ctx.config.discord_min_players
             {
-                let report = to_discord_report(enc, &self.current_zone, &self.stats_cache, &self.classes);
+                let report = to_discord_report(enc, &self.stats_cache, &self.classes);
                 core::discord::send_report_async(ctx.config.discord_webhook_url.clone(), report);
             }
         }
@@ -298,9 +442,8 @@ impl Module for DpsMeterModule {
         }.map(|enc| {
             let elapsed   = enc.elapsed().as_secs_f64();
             let players: Vec<_> = enc.players_by_damage().into_iter().cloned().collect();
-            let max_dmg   = players.first().map(|p| p.total_damage).unwrap_or(1);
             let total_dmg = enc.total_damage;
-            (elapsed, players, max_dmg, total_dmg)
+            (elapsed, players, total_dmg)
         });
 
         // ── Tab row ──────────────────────────────────────────────────────────
@@ -327,9 +470,9 @@ impl Module for DpsMeterModule {
                     let rem = self.bench_start.map(|s| {
                         self.bench_config.duration_secs.saturating_sub(s.elapsed().as_secs() as u32)
                     }).unwrap_or(self.bench_config.duration_secs);
-                    format!("🎯 {}s", rem)
+                    format!("{} {}s", egui_phosphor::regular::CROSSHAIR, rem)
                 } else {
-                    "🎯 Bench".to_string()
+                    format!("{} Bench", egui_phosphor::regular::CROSSHAIR)
                 };
                 let bench_color = if self.bench_active { ui::theme::WARN } else { ui::theme::TEXT_MUTED };
                 if tab_btn(ui, &bench_label, self.show_bench)
@@ -359,7 +502,7 @@ impl Module for DpsMeterModule {
                     );
                 });
             }
-            Some((elapsed, players, max_dmg, _total_dmg)) => {
+            Some((elapsed, players, _total_dmg)) => {
                 let mut do_reset = false;
                 let mut new_selection: Option<Option<EntityId>> = None;
 
@@ -403,16 +546,16 @@ impl Module for DpsMeterModule {
                 }
 
                 // ── Summary tiles — player-only sums ─────────────────────────
-                let names = &self.names;
+                let is_player_map = &self.is_player;
                 let player_total_dmg: u64 = players.iter()
-                    .filter(|p| names.contains_key(&p.entity_id))
-                    .map(|p| p.total_damage).sum();
+                    .filter(|p| is_player_map.get(&p.entity_id).copied().unwrap_or(false))
+                    .map(|p| p.total_damage()).sum();
                 let player_total_taken: u64 = players.iter()
-                    .filter(|p| names.contains_key(&p.entity_id))
-                    .map(|p| p.damage_taken).sum();
+                    .filter(|p| is_player_map.get(&p.entity_id).copied().unwrap_or(false))
+                    .map(|p| p.damage_taken()).sum();
                 let player_total_healed: u64 = players.iter()
-                    .filter(|p| names.contains_key(&p.entity_id))
-                    .map(|p| p.total_healing).sum();
+                    .filter(|p| is_player_map.get(&p.entity_id).copied().unwrap_or(false))
+                    .map(|p| p.total_healing()).sum();
                 let dps      = if elapsed > 0.0 { player_total_dmg as f64   / elapsed } else { 0.0 };
                 let taken_ps = if elapsed > 0.0 { player_total_taken as f64  / elapsed } else { 0.0 };
                 let heal_ps  = if elapsed > 0.0 { player_total_healed as f64 / elapsed } else { 0.0 };
@@ -462,19 +605,23 @@ impl Module for DpsMeterModule {
                                     self.rank_mode = idx as u8;
                                 }
                             }
+                            ui.add_space(12.0);
+                            ui.checkbox(&mut self.players_only, "Players Only");
                         });
                         ui.add_space(8.0);
                         // Sort by selected mode
-                        let mut ranked: Vec<_> = players.iter().collect();
+                        let mut ranked: Vec<_> = players.iter()
+                            .filter(|p| !self.players_only || self.is_player.get(&p.entity_id).copied().unwrap_or(false))
+                            .collect();
                         match self.rank_mode {
-                            1 => ranked.sort_by(|a, b| b.damage_taken.cmp(&a.damage_taken)),
-                            2 => ranked.sort_by(|a, b| b.total_healing.cmp(&a.total_healing)),
-                            _ => {} // already sorted by total_damage
+                            1 => ranked.sort_by(|a, b| b.damage_taken().cmp(&a.damage_taken())),
+                            2 => ranked.sort_by(|a, b| b.total_healing().cmp(&a.total_healing())),
+                            _ => ranked.sort_by(|a, b| b.total_damage().cmp(&a.total_damage())),
                         }
                         let max_rank_val = match self.rank_mode {
-                            1 => ranked.first().map(|p| p.damage_taken).unwrap_or(1).max(1),
-                            2 => ranked.first().map(|p| p.total_healing).unwrap_or(1).max(1),
-                            _ => max_dmg,
+                            1 => ranked.first().map(|p| p.damage_taken()).unwrap_or(1).max(1),
+                            2 => ranked.first().map(|p| p.total_healing()).unwrap_or(1).max(1),
+                            _ => ranked.first().map(|p| p.total_damage()).unwrap_or(1).max(1),
                         };
                         egui::ScrollArea::vertical()
                             .id_salt("party_scroll")
@@ -485,21 +632,21 @@ impl Module for DpsMeterModule {
                                 for (rank, player) in ranked.iter().enumerate() {
                                     let (rank_value, rank_total) = match self.rank_mode {
                                         1 => (
-                                            if elapsed > 0.0 { player.damage_taken as f64 / elapsed } else { 0.0 },
-                                            player.damage_taken,
+                                            if elapsed > 0.0 { player.damage_taken() as f64 / elapsed } else { 0.0 },
+                                            player.damage_taken(),
                                         ),
                                         2 => (
-                                            if elapsed > 0.0 { player.total_healing as f64 / elapsed } else { 0.0 },
-                                            player.total_healing,
+                                            if elapsed > 0.0 { player.total_healing() as f64 / elapsed } else { 0.0 },
+                                            player.total_healing(),
                                         ),
-                                        _ => (player.avg_dps(elapsed), player.total_damage),
+                                        _ => (player.avg_dps(elapsed), player.total_damage()),
                                     };
                                     let bar_frac = (rank_total as f32 / max_rank_val as f32).min(1.0);
                                     let is_sel   = self.selected_player == Some(player.entity_id);
                                     let class_id = self.classes.get(&player.entity_id).copied();
                                     let stats    = self.stats_cache.get(&player.entity_id);
                                     let spec     = player_spec(player);
-                                    let is_player = names.contains_key(&player.entity_id);
+                                    let is_player = self.is_player.get(&player.entity_id).copied().unwrap_or(false);
                                     let resp = player_row(ui, rank + 1, player, rank_value, rank_total, bar_frac, is_sel, class_id, stats, spec, is_player);
                                     if resp.clicked() {
                                         *new_sel = Some(if is_sel { None } else { Some(player.entity_id) });
@@ -538,21 +685,22 @@ impl Module for DpsMeterModule {
                                         .size(11.0).color(ui::theme::ACCENT),
                                 );
                                 ui.add_space(8.0);
-                                let total = player.total_damage.max(1);
+                                let total = player.total_damage().max(1);
                                 let mut skills: Vec<_> = player.skill_breakdown.values().collect();
-                                skills.sort_by(|a, b| b.total_dmg.cmp(&a.total_dmg));
+                                skills.sort_by(|a, b| b.stats.total.cmp(&a.stats.total));
                                 egui::ScrollArea::vertical()
                                     .id_salt(format!("skill_scroll_{}", sel_id.0))
                                     .min_scrolled_height(220.0)
                                     .max_height(400.0)
                                     .show(ui, |ui| {
                                         for sk in &skills {
-                                            let share    = sk.total_dmg as f64 / total as f64;
-                                            let sk_crit  = if sk.hits > 0 { sk.crits as f64 / sk.hits as f64 * 100.0 } else { 0.0 };
+                                            let share    = sk.stats.total as f64 / total as f64;
+                                            let sk_crits = sk.stats.crit_hits + sk.stats.crit_lucky_hits;
+                                            let sk_crit  = if sk.stats.hits > 0 { sk_crits as f64 / sk.stats.hits as f64 * 100.0 } else { 0.0 };
                                             let sk_label = core::DATA.skill_name(sk.skill_id)
                                                 .map(|s| s.to_string())
                                                 .unwrap_or_else(|| format!("#{}", sk.skill_id));
-                                            skill_row(ui, &sk_label, sk.total_dmg, share, sk.hits, sk_crit);
+                                            skill_row(ui, &sk_label, sk.stats.total, share, sk.stats.hits, sk_crit);
                                             ui.add_space(4.0);
                                         }
                                     });
@@ -662,7 +810,7 @@ impl DpsMeterModule {
                 }
             } else {
                 let btn = ui.button(
-                    egui::RichText::new("▶ Start Benchmark").color(egui::Color32::from_rgb(100, 220, 120))
+                    egui::RichText::new(format!("{} Start Benchmark", egui_phosphor::regular::PLAY)).color(egui::Color32::from_rgb(100, 220, 120))
                 );
                 if btn.clicked() {
                     self.bench_active = true;
@@ -708,14 +856,15 @@ impl DpsMeterModule {
                         ui.small("Skill"); ui.small("Damage"); ui.small("Hits"); ui.small("Crit%"); ui.small("Share");
                         ui.end_row();
                         for sk in &r.skills {
-                            let sk_crit = if sk.hits > 0 { sk.crits as f64 / sk.hits as f64 * 100.0 } else { 0.0 };
-                            let share   = sk.total_dmg as f64 / total as f64 * 100.0;
+                            let sk_crits = sk.stats.crit_hits + sk.stats.crit_lucky_hits;
+                            let sk_crit = if sk.stats.hits > 0 { sk_crits as f64 / sk.stats.hits as f64 * 100.0 } else { 0.0 };
+                            let share   = sk.stats.total as f64 / total as f64 * 100.0;
                             let skill_label = core::DATA.skill_name(sk.skill_id)
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("#{}", sk.skill_id));
                             ui.label(egui::RichText::new(&skill_label).small());
-                            ui.label(egui::RichText::new(fmt_damage(sk.total_dmg)).small());
-                            ui.label(egui::RichText::new(sk.hits.to_string()).small());
+                            ui.label(egui::RichText::new(fmt_damage(sk.stats.total)).small());
+                            ui.label(egui::RichText::new(sk.stats.hits.to_string()).small());
                             ui.label(egui::RichText::new(format!("{:.1}%", sk_crit)).small());
                             ui.label(egui::RichText::new(format!("{:.1}%", share)).small());
                             ui.end_row();
@@ -747,16 +896,17 @@ fn render_inspector(
 
     ui.horizontal(|ui| {
         ui.strong(&player.player_name);
-        let pin_label = if is_pinned { "📌 Unpin" } else { "📌 Pin" };
+        let pin_label = if is_pinned { format!("{} Unpin", egui_phosphor::regular::PUSH_PIN) } else { format!("{} Pin", egui_phosphor::regular::PUSH_PIN) };
         if ui.small_button(pin_label).on_hover_text("Pin — keep inspector across encounters").clicked() {
             *pinned = if is_pinned { None } else { Some(id) };
         }
     });
 
     // ── Combat summary ───────────────────────────────────────────────────────
-    let dps      = if duration > 0.0 { player.total_damage as f64 / duration } else { 0.0 };
-    let heal_ps  = if duration > 0.0 { player.total_healing as f64 / duration } else { 0.0 };
-    let crit_pct = player.crit_rate() * 100.0;
+    let dps       = if duration > 0.0 { player.total_damage() as f64 / duration } else { 0.0 };
+    let heal_ps   = if duration > 0.0 { player.total_healing() as f64 / duration } else { 0.0 };
+    let crit_pct  = player.crit_rate() * 100.0;
+    let lucky_pct = player.lucky_rate() * 100.0;
 
     egui::Grid::new("inspector_combat")
         .num_columns(4)
@@ -764,17 +914,25 @@ fn render_inspector(
         .show(ui, |ui| {
             ui.small("Total DMG"); ui.small("DPS");        ui.small("Hits");     ui.small("Crit%");
             ui.end_row();
-            ui.label(fmt_damage(player.total_damage));
+            ui.label(fmt_damage(player.total_damage()));
             ui.label(format!("{:.0}", dps));
-            ui.label(player.hit_count.to_string());
+            ui.label(player.hit_count().to_string());
             ui.label(format!("{:.1}%", crit_pct));
             ui.end_row();
 
-            ui.small("DMG Taken"); ui.small("Total Heal"); ui.small("Heal/s");   ui.small("");
+            ui.small("DMG Taken"); ui.small("Total Heal"); ui.small("Heal/s");   ui.small("Lucky%");
             ui.end_row();
-            ui.label(fmt_damage(player.damage_taken));
-            ui.label(fmt_damage(player.total_healing));
+            ui.label(fmt_damage(player.damage_taken()));
+            ui.label(fmt_damage(player.total_healing()));
             ui.label(fmt_damage(heal_ps as u64));
+            ui.label(format!("{:.1}%", lucky_pct));
+            ui.end_row();
+
+            ui.small("Deaths"); ui.small("Shield"); ui.small("Overheal"); ui.small("");
+            ui.end_row();
+            ui.label(player.deaths.to_string());
+            ui.label(fmt_damage(player.shield_gain));
+            ui.label(fmt_damage(player.overheal));
             ui.label("");
             ui.end_row();
         });
@@ -848,62 +1006,190 @@ fn render_inspector(
 
 fn to_saved_encounter(
     enc: &Encounter,
-    zone: &str,
     classes: &HashMap<EntityId, u32>,
+    monster_types: &HashMap<EntityId, i32>,
     stats_cache: &HashMap<EntityId, CharStats>,
+    is_player: &HashMap<EntityId, bool>,
+    gear_cache: &HashMap<EntityId, Vec<game::event::EquipSlot>>,
+    loadout_cache: &HashMap<EntityId, Vec<game::event::SkillLoadoutEntry>>,
 ) -> SavedEncounter {
     let duration = enc.elapsed();
     let now_utc  = chrono::Utc::now();
     let age      = std::time::Instant::now().duration_since(enc.start_time);
     let started_at = now_utc - chrono::Duration::from_std(age).unwrap_or_default();
     let ended_at   = started_at + chrono::Duration::from_std(duration).unwrap_or_default();
+    let total_elapsed = duration.as_secs_f64();
 
     let players = enc.players.values()
-        .map(|p| to_saved_player(p, classes, stats_cache.get(&p.entity_id)))
+        .map(|p| {
+            let gear_info = build_gear_info(gear_cache.get(&p.entity_id), loadout_cache.get(&p.entity_id));
+            to_saved_player(
+                p,
+                classes,
+                monster_types,
+                stats_cache.get(&p.entity_id),
+                is_player.get(&p.entity_id).copied().unwrap_or(false),
+                gear_info.as_ref(),
+                &enc.phases,
+                total_elapsed,
+            )
+        })
         .collect();
 
     SavedEncounter {
         id:           enc.id,
-        scene_name:   zone.to_string(),
+        scene_name:   enc.zone_name.clone(),
         started_at,
         ended_at,
-        duration_secs: duration.as_secs_f64(),
+        duration_secs: total_elapsed,
         players,
         total_damage:  enc.total_damage,
+        custom_name:  None,
+        outcome:      enc.outcome,
+        phases:       enc.phases.iter()
+            .map(|m| encounter_store::SavedPhaseMarker {
+                name: m.name.clone(),
+                start_offset_secs: m.start_offset_secs,
+            })
+            .collect(),
     }
 }
 
-fn to_saved_player(p: &PlayerMeter, classes: &HashMap<EntityId, u32>, stats: Option<&CharStats>) -> SavedPlayerMeter {
+fn build_gear_info(
+    slots:  Option<&Vec<game::event::EquipSlot>>,
+    skills: Option<&Vec<game::event::SkillLoadoutEntry>>,
+) -> Option<encounter_store::SavedGearInfo> {
+    if slots.is_none() && skills.is_none() { return None; }
+    let gear = slots.map(|v| v.iter().map(|s| encounter_store::SavedGearSlot {
+        slot:      s.slot,
+        item_id:   s.item_id,
+        item_name: core::DATA.item_name(s.item_id).map(|n| n.to_string()).unwrap_or_default(),
+    }).collect()).unwrap_or_default();
+    let imagines = skills.map(|v| v.iter()
+        .filter(|s| core::DATA.skill_is_imagine(s.skill_id as u32))
+        .map(|s| encounter_store::SavedImagineEntry {
+            skill_id: s.skill_id,
+            tier:     s.tier,
+            name:     core::DATA.skill_name(s.skill_id as u32).map(|n| n.to_string()).unwrap_or_default(),
+        }).collect()).unwrap_or_default();
+    Some(encounter_store::SavedGearInfo { gear, imagines })
+}
+
+/// Splits a player's timestamped hit log into per-phase stat buckets (exact
+/// per-skill breakdown per phase, derived fresh from the log — not an estimate).
+fn bucket_player_phases(
+    p: &PlayerMeter,
+    phases: &[crate::encounter::PhaseMarker],
+    total_elapsed: f64,
+) -> Vec<encounter_store::SavedPlayerPhaseStats> {
+    if phases.is_empty() { return Vec::new(); }
+
+    let ranges: Vec<(f64, f64)> = phases.iter().enumerate()
+        .map(|(i, m)| {
+            let end = phases.get(i + 1).map(|n| n.start_offset_secs).unwrap_or(total_elapsed);
+            (m.start_offset_secs, end)
+        })
+        .collect();
+
+    let mut buckets: Vec<encounter_store::SavedPlayerPhaseStats> = (0..ranges.len())
+        .map(|i| encounter_store::SavedPlayerPhaseStats { phase_index: i, ..Default::default() })
+        .collect();
+    let mut skill_maps: Vec<HashMap<u32, SavedSkillStat>> = (0..ranges.len()).map(|_| HashMap::new()).collect();
+
+    for hit in &p.hit_log {
+        let Some(idx) = ranges.iter().position(|(s, e)| hit.time_secs >= *s && (hit.time_secs < *e || *e >= total_elapsed))
+        else { continue };
+        let bucket = &mut buckets[idx];
+        match hit.kind {
+            crate::meter::HitKind::Damage => {
+                bucket.total_damage += hit.amount;
+                bucket.hits += 1;
+                let skill = skill_maps[idx].entry(hit.skill_id).or_insert_with(|| SavedSkillStat {
+                    skill_id: hit.skill_id, total_dmg: 0, hits: 0, crits: 0, max_hit: 0,
+                });
+                skill.total_dmg += hit.amount;
+                skill.hits += 1;
+                if hit.is_crit || hit.is_lucky { skill.crits += 1; }
+                if hit.amount > skill.max_hit { skill.max_hit = hit.amount; }
+            }
+            crate::meter::HitKind::Taken => bucket.damage_taken += hit.amount,
+            crate::meter::HitKind::Heal  => bucket.total_healing += hit.amount,
+        }
+    }
+
+    for (i, bucket) in buckets.iter_mut().enumerate() {
+        let mut skills: Vec<_> = skill_maps[i].values().cloned().collect();
+        skills.sort_by(|a, b| b.total_dmg.cmp(&a.total_dmg));
+        bucket.skills = skills;
+    }
+    buckets
+}
+
+fn to_saved_player(
+    p: &PlayerMeter,
+    classes: &HashMap<EntityId, u32>,
+    monster_types: &HashMap<EntityId, i32>,
+    stats: Option<&CharStats>,
+    is_player: bool,
+    gear: Option<&encounter_store::SavedGearInfo>,
+    phases: &[crate::encounter::PhaseMarker],
+    total_elapsed: f64,
+) -> SavedPlayerMeter {
     let skills = p.skill_breakdown.values().map(|s| SavedSkillStat {
         skill_id:  s.skill_id,
-        total_dmg: s.total_dmg,
-        hits:      s.hits,
-        crits:     s.crits,
-        max_hit:   s.max_hit,
+        total_dmg: s.stats.total,
+        hits:      s.stats.hits,
+        crits:     s.stats.crit_hits + s.stats.crit_lucky_hits,
+        max_hit:   s.stats.max_hit,
     }).collect();
+
+    let phase_stats = bucket_player_phases(p, phases, total_elapsed);
 
     SavedPlayerMeter {
         entity_id:      p.entity_id.0,
         name:           p.player_name.clone(),
         class_id:       classes.get(&p.entity_id).copied(),
-        total_damage:   p.total_damage,
-        hit_count:      p.hit_count,
-        crit_count:     p.crit_count,
+        monster_type:   monster_types.get(&p.entity_id).copied(),
+        total_damage:   p.total_damage(),
+        hit_count:      p.hit_count(),
+        crit_count:     p.crit_count(),
         skills,
-        damage_taken:   p.damage_taken,
-        total_healing:  p.total_healing,
+        damage_taken:   p.damage_taken(),
+        total_healing:  p.total_healing(),
         ability_score:  stats.and_then(|s| s.ability_score),
         season_strength: stats.and_then(|s| s.season_strength),
         crit_pct:       stats.and_then(|s| s.crit_pct),
         luck_pct:       stats.and_then(|s| s.luck_pct),
         crit_damage:    stats.and_then(|s| s.crit_damage),
         spec:           player_spec(p).map(|s| s.to_string()),
+        damage_lucky_hits:       p.damage_stats.lucky_hits,
+        damage_crit_lucky_hits:  p.damage_stats.crit_lucky_hits,
+        damage_crit_total:       p.damage_stats.crit_total,
+        damage_lucky_total:      p.damage_stats.lucky_total,
+        damage_crit_lucky_total: p.damage_stats.crit_lucky_total,
+        max_hit:                 p.damage_stats.max_hit,
+        max_dps:                 p.max_dps(),
+        heal_hits:               p.heal_stats.hits,
+        heal_crit_hits:          p.heal_stats.crit_hits,
+        heal_lucky_hits:         p.heal_stats.lucky_hits,
+        heal_crit_lucky_hits:    p.heal_stats.crit_lucky_hits,
+        heal_crit_total:         p.heal_stats.crit_total,
+        heal_lucky_total:        p.heal_stats.lucky_total,
+        heal_crit_lucky_total:   p.heal_stats.crit_lucky_total,
+        heal_max_hit:            p.heal_stats.max_hit,
+        overheal:                p.overheal,
+        shield_gain:             p.shield_gain,
+        deaths:                  p.deaths,
+        max_hp:                  stats.and_then(|s| s.max_hp),
+        is_player,
+        gear:                    gear.cloned(),
+        phase_stats,
     }
 }
 
 // ── Discord report builder ────────────────────────────────────────────────────
 
-fn to_discord_report(enc: &Encounter, zone: &str, stats_cache: &HashMap<EntityId, CharStats>, classes: &HashMap<EntityId, u32>) -> core::discord::DiscordReport {
+fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>, classes: &HashMap<EntityId, u32>) -> core::discord::DiscordReport {
     let age = Instant::now().duration_since(enc.start_time);
     let started_at_secs = chrono::Utc::now().timestamp() - age.as_secs() as i64;
     let duration = enc.elapsed().as_secs_f64().max(1.0);
@@ -916,14 +1202,14 @@ fn to_discord_report(enc: &Encounter, zone: &str, stats_cache: &HashMap<EntityId
                 name:            p.player_name.clone(),
                 class_name:      class_name(class_id),
                 spec:            player_spec(p).map(|s| s.to_string()),
-                total_damage:    p.total_damage,
-                dps:             p.total_damage as f64 / duration,
+                total_damage:    p.total_damage(),
+                dps:             p.total_damage() as f64 / duration,
                 crit_pct:        p.crit_rate() * 100.0,
                 crit_damage_pct: stats.and_then(|s| s.crit_damage).map(|v| v as f64 / 100.0),
                 luck_pct:        stats.and_then(|s| s.luck_pct).map(|v| v as f64 / 100.0),
-                damage_taken:    p.damage_taken,
-                total_healing:   p.total_healing,
-                heal_ps:         p.total_healing as f64 / duration,
+                damage_taken:    p.damage_taken(),
+                total_healing:   p.total_healing(),
+                heal_ps:         p.total_healing() as f64 / duration,
                 ability_score:   stats.and_then(|s| s.ability_score),
                 season_strength: stats.and_then(|s| s.season_strength),
             }
@@ -932,7 +1218,7 @@ fn to_discord_report(enc: &Encounter, zone: &str, stats_cache: &HashMap<EntityId
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
 
     core::discord::DiscordReport {
-        scene_name:      zone.to_string(),
+        scene_name:      enc.zone_name.clone(),
         duration_secs:   duration,
         players,
         total_damage:    enc.total_damage,
@@ -1206,7 +1492,7 @@ fn player_spec(player: &PlayerMeter) -> Option<&'static str> {
     let mut counts: HashMap<&'static str, u64> = HashMap::new();
     for (id, sk) in &player.skill_breakdown {
         if let Some(spec) = skill_spec(*id) {
-            *counts.entry(spec).or_default() += sk.total_dmg;
+            *counts.entry(spec).or_default() += sk.stats.total;
         }
     }
     counts.into_iter().max_by_key(|(_, dmg)| *dmg).map(|(spec, _)| spec)
@@ -1229,7 +1515,7 @@ pub fn class_name(class_id: Option<u32>) -> &'static str {
     }
 }
 
-fn class_color_egui(class_id: Option<u32>) -> egui::Color32 {
+pub fn class_color_egui(class_id: Option<u32>) -> egui::Color32 {
     match class_id {
         Some(1)  => egui::Color32::from_rgb( 90, 160, 255),
         Some(2)  => egui::Color32::from_rgb(100, 200, 255),
@@ -1244,4 +1530,32 @@ fn class_color_egui(class_id: Option<u32>) -> egui::Color32 {
         Some(13) => egui::Color32::from_rgb(220,  80, 130),
         _        => ui::theme::TEXT_MUTED,
     }
+}
+
+pub fn monster_type_name(monster_type: Option<i32>) -> &'static str {
+    match monster_type {
+        Some(0) => "Monster",
+        Some(1) => "Elite Monster",
+        Some(2) => "Boss Monster",
+        _       => "Unknown",
+    }
+}
+
+pub fn monster_type_color_egui(monster_type: Option<i32>) -> egui::Color32 {
+    match monster_type {
+        Some(0) => ui::theme::TEXT_MUTED,
+        Some(1) => ui::theme::WARN,
+        Some(2) => ui::theme::BAD,
+        _       => ui::theme::TEXT_MUTED,
+    }
+}
+
+/// Class/category name for a saved row — player profession or monster tier.
+pub fn entity_category_name(p: &SavedPlayerMeter) -> &'static str {
+    if p.is_player { class_name(p.class_id) } else { monster_type_name(p.monster_type) }
+}
+
+/// Row tint color — player class color or monster tier color.
+pub fn entity_row_color(p: &SavedPlayerMeter) -> egui::Color32 {
+    if p.is_player { class_color_egui(p.class_id) } else { monster_type_color_egui(p.monster_type) }
 }

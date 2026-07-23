@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-core    = { path = "../core" }
-game    = { path = "../game" }
-egui    = { workspace = true }
-tracing = { workspace = true }
+core          = { path = "../core" }
+game          = { path = "../game" }
+egui          = { workspace = true }
+egui-phosphor = { workspace = true }
+tracing       = { workspace = true }

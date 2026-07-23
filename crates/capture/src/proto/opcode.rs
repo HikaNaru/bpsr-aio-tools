@@ -1,7 +1,10 @@
 use crate::proto::packets::pb;
 use bpsr_core::types::EntityId;
 use game::entity::CharStats;
-use game::event::{ChatChannel, CombatEvent, DungeonStateKind, GameEvent, MatchAlertKind, ModuleEffect, PlayerModule};
+use game::event::{
+    ChatChannel, CombatEvent, DungeonStateKind, DungeonTargetProgress, EquipSlot, GameEvent,
+    MatchAlertKind, ModuleEffect, PlayerModule, ShieldEntry, SkillLoadoutEntry,
+};
 use prost::Message;
 use std::time::Instant;
 use tracing::debug;
@@ -615,7 +618,7 @@ fn parse_sync_container_data(msg: pb::SyncContainerData) -> Vec<GameEvent> {
     let class = v_data.profession_list.map(|p| p.cur_profession_id as u32);
 
     if !name.is_empty() || class.is_some() {
-        events.push(GameEvent::EntityName { id: entity_id, name, class });
+        events.push(GameEvent::EntityName { id: entity_id, name, class, monster_type: None, is_player: true });
     }
     events.push(GameEvent::LocalPlayer { id: entity_id });
 
@@ -748,6 +751,7 @@ fn parse_aoi_sync_delta(delta: pb::AoiSyncDelta) -> Vec<GameEvent> {
 fn parse_npc_attrs(entity_id: EntityId, ent_type: i32, attrs: Vec<pb::Attr>) -> Vec<GameEvent> {
     let mut name_direct = None::<String>;
     let mut config_id   = None::<u32>;
+    let mut stats       = CharStats::default();
 
     for attr in &attrs {
         match attr.id {
@@ -764,6 +768,12 @@ fn parse_npc_attrs(entity_id: EntityId, ent_type: i32, attrs: Vec<pb::Attr>) -> 
                     config_id = Some(id as u32);
                 }
             }
+            // HP/MaxHP/State — needed to cross-check boss reset/wipe state.
+            11310 => { stats.hp          = decode_varint(&attr.raw_data).map(|v| v as i64); }
+            11320 => { stats.max_hp      = decode_varint(&attr.raw_data).map(|v| v as i64); }
+            11      => { stats.actor_state = decode_varint(&attr.raw_data).map(|v| v as i32); }
+            // SeasonStrength — sent by the server for some bosses/elites, mirrors player attr 11440.
+            11440 => { stats.season_strength = decode_varint(&attr.raw_data).map(|v| v as u32); }
             _ => {}
         }
     }
@@ -777,11 +787,31 @@ fn parse_npc_attrs(entity_id: EntityId, ent_type: i32, attrs: Vec<pb::Attr>) -> 
     }).map(|s| s.to_string())
     .or(name_direct);
 
+    let monster_type = if ent_type == 1 { config_id.and_then(|id| bpsr_core::DATA.monster_type(id)) } else { None };
+
+    let mut events = Vec::new();
     if let Some(name) = resolved {
-        vec![GameEvent::EntityName { id: entity_id, name, class: None }]
-    } else {
-        vec![]
+        events.push(GameEvent::EntityName { id: entity_id, name, class: None, monster_type, is_player: false });
     }
+    if stats.hp.is_some() || stats.max_hp.is_some() || stats.actor_state.is_some() || stats.season_strength.is_some() {
+        events.push(GameEvent::EntityStats { id: entity_id, stats });
+    }
+    events
+}
+
+/// Decodes a raw attribute payload that is a back-to-back sequence of
+/// length-delimited protobuf messages (the wire shape used by list-typed
+/// attributes such as AttrShieldList/AttrEquipData/AttrSkillLevelIdList).
+fn decode_message_list<M: prost::Message + Default>(data: &[u8]) -> Vec<M> {
+    let mut buf = data;
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        match M::decode_length_delimited(&mut buf) {
+            Ok(msg) => out.push(msg),
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEvent> {
@@ -789,6 +819,37 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
     let mut name  = None::<String>;
     let mut class = None::<u32>;
     let mut stats = CharStats::default();
+
+    for attr in &attrs {
+        if attr.raw_data.is_empty() { continue; }
+        match attr.id {
+            // AttrShieldList = 60050
+            60050 => {
+                let shields: Vec<ShieldEntry> = decode_message_list::<pb::ShieldInfo>(&attr.raw_data)
+                    .into_iter()
+                    .map(|s| ShieldEntry { uuid: s.uuid, value: s.value, initial_value: s.initial_value })
+                    .collect();
+                events.push(GameEvent::ShieldList { id: entity_id, shields });
+            }
+            // AttrEquipData = 200
+            200 => {
+                let slots: Vec<EquipSlot> = decode_message_list::<pb::EquipNine>(&attr.raw_data)
+                    .into_iter()
+                    .map(|e| EquipSlot { slot: e.slot, item_id: e.equip_id })
+                    .collect();
+                events.push(GameEvent::EquipData { id: entity_id, slots });
+            }
+            // AttrSkillLevelIdList = 116
+            116 => {
+                let skills: Vec<SkillLoadoutEntry> = decode_message_list::<pb::SkillLevelInfo>(&attr.raw_data)
+                    .into_iter()
+                    .map(|s| SkillLoadoutEntry { skill_id: s.skill_id, current_level: s.current_level, tier: s.remodel_level })
+                    .collect();
+                events.push(GameEvent::SkillLoadout { id: entity_id, skills });
+            }
+            _ => {}
+        }
+    }
 
     for attr in attrs {
         if attr.raw_data.is_empty() { continue; }
@@ -839,6 +900,8 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
             11720 => { stats.atk_speed_pct  = decode_varint(&attr.raw_data).map(|v| v as u32); }
             11730 => { stats.cast_speed_pct = decode_varint(&attr.raw_data).map(|v| v as u32); }
             12510 => { stats.crit_damage    = decode_varint(&attr.raw_data).map(|v| v as u32); }
+            // ATTR_STATE = 11 (EActorState; 9 = Dead)
+            11 => { stats.actor_state = decode_varint(&attr.raw_data).map(|v| v as i32); }
             _ => {}
         }
     }
@@ -848,6 +911,8 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
             id: entity_id,
             name: name.unwrap_or_default(),
             class,
+            monster_type: None,
+            is_player: true,
         });
     }
     let has_stats = stats.level.is_some() || stats.ability_score.is_some() || stats.season_strength.is_some()
@@ -857,7 +922,8 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
         || stats.mastery.is_some() || stats.versatility.is_some() || stats.block.is_some()
         || stats.crit_pct.is_some() || stats.luck_pct.is_some() || stats.haste_pct.is_some()
         || stats.mastery_pct.is_some() || stats.versatility_pct.is_some() || stats.block_pct.is_some()
-        || stats.atk_speed_pct.is_some() || stats.cast_speed_pct.is_some() || stats.crit_damage.is_some();
+        || stats.atk_speed_pct.is_some() || stats.cast_speed_pct.is_some() || stats.crit_damage.is_some()
+        || stats.actor_state.is_some();
     if has_stats {
         events.push(GameEvent::EntityStats { id: entity_id, stats });
     }
@@ -878,11 +944,12 @@ fn parse_damage(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEven
         return None;
     };
 
-    // Use lucky_value (crit/lucky damage) if non-zero, else regular value
-    let damage = if dmg.lucky_value != 0 { dmg.lucky_value } else { dmg.value };
+    // Matches ZDPS precedence: Value first, LuckyValue (crit/lucky damage) fallback.
+    let damage = if dmg.value != 0 { dmg.value } else { dmg.lucky_value };
     if damage <= 0 { return None; }
 
-    let is_crit = (dmg.type_flag & 0b0000_0001) != 0;
+    let is_crit  = (dmg.type_flag & 0b0000_0001) != 0;
+    let is_lucky = dmg.lucky_value != 0;
 
     Some(CombatEvent {
         timestamp:  Instant::now(),
@@ -891,6 +958,7 @@ fn parse_damage(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEven
         skill_id:   dmg.owner_id as u32,
         damage:     damage as u64,
         is_crit,
+        is_lucky,
         is_dot:     false,
         element:    None,
     })
@@ -905,9 +973,10 @@ fn parse_heal(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEvent>
     } else {
         return None;
     };
-    let amount = if dmg.lucky_value != 0 { dmg.lucky_value } else { dmg.value };
+    let amount = if dmg.value != 0 { dmg.value } else { dmg.lucky_value };
     if amount <= 0 { return None; }
-    let is_crit = (dmg.type_flag & 0b0000_0001) != 0;
+    let is_crit  = (dmg.type_flag & 0b0000_0001) != 0;
+    let is_lucky = dmg.lucky_value != 0;
     Some(CombatEvent {
         timestamp: Instant::now(),
         source_id: EntityId((healer_uuid >> 16) as u64),
@@ -915,6 +984,7 @@ fn parse_heal(target_uuid: i64, dmg: &pb::SyncDamageInfo) -> Option<CombatEvent>
         skill_id:  dmg.owner_id as u32,
         damage:    amount as u64,
         is_crit,
+        is_lucky,
         is_dot:    false,
         element:   None,
     })
@@ -951,10 +1021,25 @@ fn parse_enter_match_result(msg: pb::EnterMatchResultNtf) -> Vec<GameEvent> {
 
 fn parse_sync_dungeon_data(msg: pb::SyncDungeonData) -> Vec<GameEvent> {
     let Some(data) = msg.v_data else { return vec![] };
-    let Some(flow) = data.flow_info else { return vec![] };
-    vec![GameEvent::DungeonState {
-        state: DungeonStateKind::from_i32(flow.state),
-    }]
+    let mut events = Vec::new();
+
+    if let Some(flow) = &data.flow_info {
+        events.push(GameEvent::DungeonState {
+            state: DungeonStateKind::from_i32(flow.state),
+        });
+    }
+
+    let targets: Vec<DungeonTargetProgress> = data.target
+        .map(|t| t.target_data.into_values().map(|d| DungeonTargetProgress {
+            target_id: d.target_id, nums: d.nums, complete: d.complete,
+        }).collect())
+        .unwrap_or_default();
+    let phase_id = data.dungeon_phase_data.map(|p| p.phase_id);
+    if !targets.is_empty() || phase_id.is_some() {
+        events.push(GameEvent::DungeonPhaseSignal { targets, phase_id });
+    }
+
+    events
 }
 
 /// Standard protobuf varint decoder.

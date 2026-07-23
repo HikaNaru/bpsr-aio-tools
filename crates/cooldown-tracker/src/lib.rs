@@ -69,7 +69,7 @@ impl Default for CooldownModule {
 impl Module for CooldownModule {
     fn id(&self)   -> &'static str { "cooldown" }
     fn name(&self) -> &str         { "Cooldowns" }
-    fn icon(&self) -> &str         { "◔" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::CLOCK_COUNTDOWN }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
@@ -113,7 +113,8 @@ impl Module for CooldownModule {
         ui.horizontal(|ui| {
             ui.heading("Cooldown Tracker");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let cfg_label = if self.show_config { "⚙ Hide Config" } else { "⚙ Config" };
+                let gear = egui_phosphor::regular::GEAR;
+                let cfg_label = if self.show_config { format!("{gear} Hide Config") } else { format!("{gear} Config") };
                 if ui.button(cfg_label).clicked() {
                     self.show_config = !self.show_config;
                 }
@@ -148,10 +149,10 @@ impl CooldownModule {
                 cols[0].horizontal(|ui| {
                     ui.label(format!("{} ({})", ent.name, format_uid(ent.uid)));
                     if n > 1 {
-                        if ui.small_button("▲").clicked() && i > 0     { move_up = Some(i); }
-                        if ui.small_button("▼").clicked() && i + 1 < n { move_dn = Some(i); }
+                        if ui.small_button(egui_phosphor::regular::CARET_UP).clicked() && i > 0     { move_up = Some(i); }
+                        if ui.small_button(egui_phosphor::regular::CARET_DOWN).clicked() && i + 1 < n { move_dn = Some(i); }
                     }
-                    if ui.small_button("✖").clicked() { remove_ent = Some(i); }
+                    if ui.small_button(egui_phosphor::regular::X).clicked() { remove_ent = Some(i); }
                 });
             }
             if let Some(i) = move_up { self.entities.swap(i, i - 1); }
@@ -194,7 +195,7 @@ impl CooldownModule {
             for (i, sk) in self.skills.iter().enumerate() {
                 cols[1].horizontal(|ui| {
                     ui.label(format!("{} (id:{} {}s)", sk.label, sk.skill_id, sk.cooldown_secs));
-                    if ui.small_button("✖").clicked() { remove_sk = Some(i); }
+                    if ui.small_button(egui_phosphor::regular::X).clicked() { remove_sk = Some(i); }
                 });
             }
             if let Some(i) = remove_sk { self.skills.remove(i); }
@@ -244,7 +245,7 @@ impl CooldownModule {
     fn render_live(&self, ui: &mut egui::Ui) {
         if self.entities.is_empty() || self.skills.is_empty() {
             ui.label(
-                egui::RichText::new("Add players and skills in ⚙ Config to track cooldowns.")
+                egui::RichText::new(format!("Add players and skills in {} Config to track cooldowns.", egui_phosphor::regular::GEAR))
                     .color(egui::Color32::from_rgb(140, 140, 160))
             );
             return;
@@ -327,7 +328,7 @@ fn render_cd_pill(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            format!("✓ {}", skill.label),
+            format!("{} {}", egui_phosphor::regular::CHECK, skill.label),
             egui::FontId::proportional(11.0),
             egui::Color32::from_rgb(180, 255, 180),
         );

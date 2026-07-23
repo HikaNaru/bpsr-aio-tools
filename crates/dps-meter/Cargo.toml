@@ -10,6 +10,7 @@ encounter-store   = { path = "../encounter-store" }
 ui                = { path = "../ui" }
 egui              = { workspace = true }
 egui_plot         = { workspace = true }
+egui-phosphor     = { workspace = true }
 serde             = { workspace = true }
 indexmap          = { workspace = true }
 uuid              = { workspace = true }

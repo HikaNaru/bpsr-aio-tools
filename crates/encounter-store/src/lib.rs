@@ -5,6 +5,15 @@ use uuid::Uuid;
 
 // ── Stored types ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EncounterOutcome {
+    Clear,
+    Failed,
+    ManualStop,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSkillStat {
     pub skill_id:  u32,
@@ -14,11 +23,48 @@ pub struct SavedSkillStat {
     pub max_hit:   u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SavedGearSlot {
+    pub slot:      i32,
+    pub item_id:   i32,
+    pub item_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SavedImagineEntry {
+    pub skill_id: i32,
+    pub tier:     i32,
+    pub name:     String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SavedGearInfo {
+    pub gear:     Vec<SavedGearSlot>,
+    pub imagines: Vec<SavedImagineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SavedPlayerPhaseStats {
+    pub phase_index:   usize,
+    pub total_damage:  u64,
+    pub hits:          u64,
+    pub damage_taken:  u64,
+    pub total_healing: u64,
+    pub skills:        Vec<SavedSkillStat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SavedPhaseMarker {
+    pub name:              String,
+    pub start_offset_secs: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPlayerMeter {
     pub entity_id:      u64,
     pub name:           String,
     pub class_id:       Option<u32>,
+    #[serde(default)] pub monster_type: Option<i32>,
     pub total_damage:   u64,
     pub hit_count:      u64,
     pub crit_count:     u64,
@@ -31,6 +77,31 @@ pub struct SavedPlayerMeter {
     #[serde(default)] pub luck_pct:       Option<u32>,
     #[serde(default)] pub crit_damage:    Option<u32>,
     #[serde(default)] pub spec:           Option<String>,
+    // ── Lucky / crit-lucky splits (damage) ──────────────────────────────────
+    #[serde(default)] pub damage_lucky_hits:       u64,
+    #[serde(default)] pub damage_crit_lucky_hits:  u64,
+    #[serde(default)] pub damage_crit_total:       u64,
+    #[serde(default)] pub damage_lucky_total:      u64,
+    #[serde(default)] pub damage_crit_lucky_total: u64,
+    #[serde(default)] pub max_hit:                 u64,
+    #[serde(default)] pub max_dps:                 f64,
+    // ── Healing splits ───────────────────────────────────────────────────────
+    #[serde(default)] pub heal_hits:              u64,
+    #[serde(default)] pub heal_crit_hits:          u64,
+    #[serde(default)] pub heal_lucky_hits:         u64,
+    #[serde(default)] pub heal_crit_lucky_hits:    u64,
+    #[serde(default)] pub heal_crit_total:         u64,
+    #[serde(default)] pub heal_lucky_total:        u64,
+    #[serde(default)] pub heal_crit_lucky_total:   u64,
+    #[serde(default)] pub heal_max_hit:            u64,
+    #[serde(default)] pub overheal:                u64,
+    // ── Misc new stats ───────────────────────────────────────────────────────
+    #[serde(default)] pub shield_gain: u64,
+    #[serde(default)] pub deaths:      u32,
+    #[serde(default)] pub max_hp:      Option<i64>,
+    #[serde(default)] pub is_player:   bool,
+    #[serde(default)] pub gear:        Option<SavedGearInfo>,
+    #[serde(default)] pub phase_stats: Vec<SavedPlayerPhaseStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +113,9 @@ pub struct SavedEncounter {
     pub duration_secs: f64,
     pub players:      Vec<SavedPlayerMeter>,
     pub total_damage: u64,
+    #[serde(default)] pub custom_name: Option<String>,
+    #[serde(default)] pub outcome:     EncounterOutcome,
+    #[serde(default)] pub phases:      Vec<SavedPhaseMarker>,
 }
 
 /// Lightweight summary stored alongside the compressed encounter file.
@@ -56,6 +130,8 @@ pub struct EncounterSummary {
     pub total_damage:    u64,
     pub top_player_name: String,
     pub top_player_dps:  f64,
+    #[serde(default)] pub custom_name: Option<String>,
+    #[serde(default)] pub outcome:     EncounterOutcome,
 }
 
 // ── Store ────────────────────────────────────────────────────────────────────
@@ -108,6 +184,44 @@ impl EncounterStore {
         let _ = std::fs::remove_file(self.enc_path(id));
         let _ = std::fs::remove_file(self.sum_path(id));
         Ok(())
+    }
+
+    /// Deletes every saved encounter. Reuses `delete()` per-id so partial
+    /// failures are collected rather than aborting the whole operation.
+    pub fn clear_all(&self) -> anyhow::Result<()> {
+        let mut first_err = None;
+        for s in self.list_summaries() {
+            if let Err(e) = self.delete(s.id) {
+                tracing::warn!("clear_all delete {}: {e}", s.id);
+                first_err.get_or_insert(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None    => Ok(()),
+        }
+    }
+
+    /// Deletes every saved encounter started before `cutoff`.
+    pub fn clear_before(&self, cutoff: DateTime<Utc>) -> anyhow::Result<usize> {
+        let mut count = 0;
+        for s in self.list_summaries() {
+            if s.started_at < cutoff {
+                if let Err(e) = self.delete(s.id) {
+                    tracing::warn!("clear_before delete {}: {e}", s.id);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Renames a saved encounter (sets/clears its custom display name).
+    pub fn rename(&self, id: Uuid, name: Option<String>) -> anyhow::Result<()> {
+        let mut enc = self.load(id)?;
+        enc.custom_name = name;
+        self.save(&enc)
     }
 
     /// Returns summaries sorted newest-first.
@@ -214,5 +328,7 @@ fn summary_of(enc: &SavedEncounter) -> EncounterSummary {
         total_damage:    enc.total_damage,
         top_player_name: top_name,
         top_player_dps:  top_dps,
+        custom_name:     enc.custom_name.clone(),
+        outcome:         enc.outcome,
     }
 }

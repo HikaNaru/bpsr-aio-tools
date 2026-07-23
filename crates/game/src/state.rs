@@ -15,7 +15,7 @@ pub struct GameState {
 impl GameState {
     pub fn apply(&mut self, event: &GameEvent) {
         match event {
-            GameEvent::EntityName { id, name, class } => {
+            GameEvent::EntityName { id, name, class, .. } => {
                 let entity = self.entities.entry(*id).or_insert_with(|| Entity::new(*id));
                 entity.name = name.clone();
                 entity.class_id = *class;
@@ -46,6 +46,10 @@ impl GameState {
             GameEvent::Combat(_)
             | GameEvent::Heal(_)
             | GameEvent::PlayerInventory { .. }
+            | GameEvent::ShieldList { .. }
+            | GameEvent::EquipData { .. }
+            | GameEvent::SkillLoadout { .. }
+            | GameEvent::DungeonPhaseSignal { .. }
             | GameEvent::Chat { .. }
             | GameEvent::MatchmakingAlert { .. }
             | GameEvent::ThreatUpdate { .. }

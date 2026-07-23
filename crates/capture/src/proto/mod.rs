@@ -131,7 +131,7 @@ fn process_frame_buffer(data: &[u8]) -> Vec<GameEvent> {
 
 fn format_event(event: &GameEvent) -> String {
     match event {
-        GameEvent::EntityName { id, name, class } => {
+        GameEvent::EntityName { id, name, class, .. } => {
             format!("[EntityName] id={:#x} name={:?} class={:?}", id.0, name, class)
         }
         GameEvent::Combat(c) => {
@@ -158,6 +158,15 @@ fn format_event(event: &GameEvent) -> String {
         GameEvent::PlayerInventory { id, modules } => {
             format!("[PlayerInventory] id={:#x} modules={}", id.0, modules.len())
         }
+        GameEvent::ShieldList { id, shields } => {
+            format!("[ShieldList] id={:#x} shields={}", id.0, shields.len())
+        }
+        GameEvent::EquipData { id, slots } => {
+            format!("[EquipData] id={:#x} slots={}", id.0, slots.len())
+        }
+        GameEvent::SkillLoadout { id, skills } => {
+            format!("[SkillLoadout] id={:#x} skills={}", id.0, skills.len())
+        }
         GameEvent::EntityStats { id, stats } => {
             format!(
                 "[EntityStats] id={:#x} lv={:?} hp={:?}/{:?} atk={:?} gs={:?}",
@@ -166,6 +175,9 @@ fn format_event(event: &GameEvent) -> String {
         }
         GameEvent::DungeonState { state } => {
             format!("[DungeonState] state={state:?}")
+        }
+        GameEvent::DungeonPhaseSignal { targets, phase_id } => {
+            format!("[DungeonPhaseSignal] phase_id={phase_id:?} targets={}", targets.len())
         }
         GameEvent::Chat { channel, sender_name, text, .. } => {
             format!("[Chat] ch={channel:?} from={sender_name:?} text={text:?}")

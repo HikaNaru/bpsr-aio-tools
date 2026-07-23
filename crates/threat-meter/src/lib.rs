@@ -50,7 +50,7 @@ impl Default for ThreatModule {
 impl Module for ThreatModule {
     fn id(&self)   -> &'static str { "threat-meter" }
     fn name(&self) -> &str         { "Threat" }
-    fn icon(&self) -> &str         { "🎯" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::CROSSHAIR }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn update(&mut self, _ctx: &ModuleContext) {
@@ -101,7 +101,7 @@ impl Module for ThreatModule {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("🎯 Threat Meter")
+                    egui::RichText::new(format!("{} Threat Meter", egui_phosphor::regular::CROSSHAIR))
                         .strong()
                         .size(16.0)
                         .color(egui::Color32::from_rgb(180, 180, 200))
@@ -185,7 +185,7 @@ impl Module for ThreatModule {
 
                     // Rank — skull for top threat
                     if is_tank {
-                        ui.label(egui::RichText::new("💀").strong());
+                        ui.label(egui::RichText::new(egui_phosphor::regular::SKULL).strong());
                     } else {
                         ui.label(format!("{}", rank + 1));
                     }

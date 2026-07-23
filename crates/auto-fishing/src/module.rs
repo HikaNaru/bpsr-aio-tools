@@ -765,7 +765,7 @@ fn state_color(state: &FishingState) -> egui::Color32 {
 impl Module for FishingModule {
     fn id(&self)   -> &'static str { "auto-fishing" }
     fn name(&self) -> &str         { "Auto Fishing" }
-    fn icon(&self) -> &str         { "🎣" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::FISH_SIMPLE }
 
     fn update(&mut self, _ctx: &ModuleContext) {}
 
@@ -841,21 +841,21 @@ impl Module for FishingModule {
         // ── Controls ─────────────────────────────────────────────────────
         if self.enabled && paused {
             ui.horizontal(|ui| {
-                if ui.button("▶ Resume").clicked() {
+                if ui.button(format!("{} Resume", egui_phosphor::regular::PLAY)).clicked() {
                     self.focus_game();
                     self.paused.store(false, Ordering::Relaxed);
                 }
-                if ui.button("⏹ Stop").clicked() {
+                if ui.button(format!("{} Stop", egui_phosphor::regular::STOP)).clicked() {
                     self.enabled = false;
                     self.on_disable();
                 }
             });
         } else if self.enabled {
-            if ui.button("⏹ Stop").clicked() {
+            if ui.button(format!("{} Stop", egui_phosphor::regular::STOP)).clicked() {
                 self.enabled = false;
                 self.on_disable();
             }
-        } else if ui.button("▶ Start Fishing").clicked() {
+        } else if ui.button(format!("{} Start Fishing", egui_phosphor::regular::PLAY)).clicked() {
             self.enabled = true;
             self.on_enable();
         }
@@ -1087,7 +1087,7 @@ impl Module for FishingModule {
 
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("💾 Save Config").clicked() {
+                        if ui.button(format!("{} Save Config", egui_phosphor::regular::FLOPPY_DISK)).clicked() {
                             let mut to_save = self.config.clone();
                             scale_regions(&mut to_save, self.last_window_size, (1600, 900));
                             to_save.save();
@@ -1109,16 +1109,17 @@ impl Module for FishingModule {
         ui.collapsing("Regions & Preview", |ui| {
             // Color legend
             ui.horizontal_wrapped(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(220, 100, 255), "■ Fishing mode");
-                ui.colored_label(egui::Color32::from_rgb(255, 220,   0), "■ Fishing rod");
-                ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "■ Rod use btn");
-                ui.colored_label(egui::Color32::from_rgb(255, 150,   0), "■ Bite");
-                ui.colored_label(egui::Color32::from_rgb(  0, 220, 200), "■ Tension bar");
-                ui.colored_label(egui::Color32::from_rgb(  0, 200, 140), "■ Tension pct");
-                ui.colored_label(egui::Color32::from_rgb( 50, 180, 255), "■ Continue btn");
-                ui.colored_label(egui::Color32::from_rgb(255,  80, 200), "■ Left arrow");
-                ui.colored_label(egui::Color32::from_rgb(255, 160, 220), "■ Right arrow");
-                ui.colored_label(egui::Color32::from_rgb(180, 255,   0), "■ Monthly reward");
+                let sq = egui_phosphor::regular::SQUARE;
+                ui.colored_label(egui::Color32::from_rgb(220, 100, 255), format!("{sq} Fishing mode"));
+                ui.colored_label(egui::Color32::from_rgb(255, 220,   0), format!("{sq} Fishing rod"));
+                ui.colored_label(egui::Color32::from_rgb(100, 255, 100), format!("{sq} Rod use btn"));
+                ui.colored_label(egui::Color32::from_rgb(255, 150,   0), format!("{sq} Bite"));
+                ui.colored_label(egui::Color32::from_rgb(  0, 220, 200), format!("{sq} Tension bar"));
+                ui.colored_label(egui::Color32::from_rgb(  0, 200, 140), format!("{sq} Tension pct"));
+                ui.colored_label(egui::Color32::from_rgb( 50, 180, 255), format!("{sq} Continue btn"));
+                ui.colored_label(egui::Color32::from_rgb(255,  80, 200), format!("{sq} Left arrow"));
+                ui.colored_label(egui::Color32::from_rgb(255, 160, 220), format!("{sq} Right arrow"));
+                ui.colored_label(egui::Color32::from_rgb(180, 255,   0), format!("{sq} Monthly reward"));
             });
             ui.horizontal(|ui| {
                 if ui.button("Capture preview").clicked() {

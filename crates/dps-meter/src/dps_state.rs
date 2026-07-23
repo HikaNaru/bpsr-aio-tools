@@ -1,4 +1,4 @@
-use crate::encounter::Encounter;
+use crate::encounter::{Encounter, EncounterOutcome};
 use core::types::EntityId;
 use game::event::DungeonStateKind;
 use game::GameEvent;
@@ -24,7 +24,7 @@ impl DpsState {
         }
     }
 
-    pub fn apply_event<F>(&mut self, event: &GameEvent, name_resolver: F)
+    pub fn apply_event<F>(&mut self, event: &GameEvent, zone_name: &str, zone_id: u32, name_resolver: F)
     where
         F: Fn(EntityId) -> String,
     {
@@ -36,7 +36,7 @@ impl DpsState {
         // Encounters end only via ZoneChange, DungeonState::End/Settlement/Vote,
         // or the manual Reset button (matching ZDPS behavior).
         if self.active.is_none() {
-            self.active = Some(Encounter::new());
+            self.active = Some(Encounter::new(zone_name.to_string(), zone_id));
         }
 
         if let Some(enc) = &mut self.active {
@@ -88,6 +88,11 @@ impl DpsState {
                 DungeonStateKind::End
                 | DungeonStateKind::Settlement
                 | DungeonStateKind::Vote => {
+                    if let Some(enc) = &mut self.active {
+                        if enc.outcome == EncounterOutcome::Unknown {
+                            enc.outcome = EncounterOutcome::Clear;
+                        }
+                    }
                     self.finish_active();
                     self.in_dungeon = false;
                 }
@@ -105,6 +110,11 @@ impl DpsState {
     }
 
     pub fn reset(&mut self) {
+        if let Some(enc) = &mut self.active {
+            if enc.outcome == EncounterOutcome::Unknown {
+                enc.outcome = EncounterOutcome::ManualStop;
+            }
+        }
         self.finish_active();
         self.in_dungeon = false;
     }

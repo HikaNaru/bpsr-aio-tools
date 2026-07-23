@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 egui           = { workspace = true }
+egui-phosphor  = { workspace = true }
 parking_lot    = { workspace = true }
 core           = { path = "../core" }
 game           = { path = "../game" }

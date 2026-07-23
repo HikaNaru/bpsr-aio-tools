@@ -18,7 +18,7 @@ impl CharacterModule {
 impl Module for CharacterModule {
     fn id(&self)   -> &'static str { "character" }
     fn name(&self) -> &str         { "Character" }
-    fn icon(&self) -> &str         { "👤" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::USER }
 
     fn update(&mut self, _ctx: &ModuleContext) {}
 

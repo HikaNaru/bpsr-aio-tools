@@ -157,7 +157,7 @@ impl OptimizerModule {
 impl Module for OptimizerModule {
     fn id(&self)   -> &'static str { "optimizer" }
     fn name(&self) -> &str         { "Module Optimizer" }
-    fn icon(&self) -> &str         { "◎" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::PUZZLE_PIECE }
 
     fn update(&mut self, _ctx: &ModuleContext) {
         self.poll_result();
@@ -174,7 +174,7 @@ impl Module for OptimizerModule {
         ui.horizontal(|ui| {
             ui.heading("Module Optimizer");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙").on_hover_text("Settings / Presets").clicked() {
+                if ui.button(egui_phosphor::regular::GEAR).on_hover_text("Settings / Presets").clicked() {
                     self.show_settings = !self.show_settings;
                 }
             });
@@ -231,10 +231,10 @@ impl Module for OptimizerModule {
                     // Up / down
                     ui.vertical(|ui| {
                         ui.set_min_width(18.0);
-                        if ui.small_button("▲").clicked() && i > 0 {
+                        if ui.small_button(egui_phosphor::regular::CARET_UP).clicked() && i > 0 {
                             swap = Some((i - 1, i));
                         }
-                        if ui.small_button("▼").clicked() && i + 1 < prio_len {
+                        if ui.small_button(egui_phosphor::regular::CARET_DOWN).clicked() && i + 1 < prio_len {
                             swap = Some((i, i + 1));
                         }
                     });
@@ -260,7 +260,7 @@ impl Module for OptimizerModule {
                         .prefix("min: "));
 
                     // Remove
-                    if ui.button("✖").clicked() {
+                    if ui.button(egui_phosphor::regular::X).clicked() {
                         to_remove = Some(i);
                     }
 
@@ -304,7 +304,7 @@ impl Module for OptimizerModule {
         let is_running = matches!(self.calc_state, CalcState::Running(_));
         ui.horizontal(|ui| {
             let calc_btn = egui::Button::new(
-                if is_running { "⏳ Calculating…" } else { "▶ Calculate" }
+                if is_running { format!("{} Calculating…", egui_phosphor::regular::HOURGLASS) } else { format!("{} Calculate", egui_phosphor::regular::PLAY) }
             );
             if ui.add_enabled(!is_running, calc_btn).clicked() {
                 self.start_calculation();
@@ -368,14 +368,15 @@ impl Module for OptimizerModule {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
-fn breakpoint_label(total: u8) -> &'static str {
+fn breakpoint_label(total: u8) -> String {
+    let star = egui_phosphor::regular::STAR;
     match total {
-        t if t >= 20 => "★★★★★★ (max)",
-        t if t >= 16 => "★★★★★",
-        t if t >= 12 => "★★★★",
-        t if t >= 8  => "★★★",
-        t if t >= 4  => "★★",
-        t if t >= 1  => "★",
-        _            => "—",
+        t if t >= 20 => format!("{}{}{}{}{}{} (max)", star, star, star, star, star, star),
+        t if t >= 16 => star.repeat(5),
+        t if t >= 12 => star.repeat(4),
+        t if t >= 8  => star.repeat(3),
+        t if t >= 4  => star.repeat(2),
+        t if t >= 1  => star.to_string(),
+        _            => "—".to_string(),
     }
 }

@@ -57,12 +57,12 @@ pub fn sidebar(
             }
 
             if debug_enabled {
-                if sidebar_btn(ui, "◑", "Debug", show_debug, &fade) {
+                if sidebar_btn(ui, egui_phosphor::regular::BUG, "Debug", show_debug, &fade) {
                     result.debug_clicked = true;
                 }
             }
 
-            if sidebar_btn(ui, "⚙", "Settings", show_settings, &fade) {
+            if sidebar_btn(ui, egui_phosphor::regular::GEAR, "Settings", show_settings, &fade) {
                 result.settings_clicked = true;
             }
         },

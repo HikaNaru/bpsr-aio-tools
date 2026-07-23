@@ -165,7 +165,7 @@ impl Default for BPTimerModule {
 impl Module for BPTimerModule {
     fn id(&self)   -> &'static str { "bptimer" }
     fn name(&self) -> &str         { "BPTimer" }
-    fn icon(&self) -> &str         { "▶" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::TIMER }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn update(&mut self, ctx: &ModuleContext) {
@@ -189,7 +189,7 @@ impl Module for BPTimerModule {
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         // ── Header ────────────────────────────────────────────────────────────
         ui.horizontal(|ui| {
-            let arrow = if self.collapsed { "▶" } else { "▼" };
+            let arrow = if self.collapsed { egui_phosphor::regular::CARET_RIGHT } else { egui_phosphor::regular::CARET_DOWN };
             if ui.small_button(arrow).clicked() {
                 self.collapsed = !self.collapsed;
             }

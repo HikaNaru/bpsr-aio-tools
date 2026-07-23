@@ -35,6 +35,10 @@ impl BpsrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         ui::theme::apply(&cc.egui_ctx);
 
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         let mut config = AppConfig::load();
         config.click_passthrough = false;
 
@@ -495,7 +499,7 @@ impl eframe::App for BpsrApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Window control buttons
-                        let lock_label = if self.config.lock_position { "🔒" } else { "🔓" };
+                        let lock_label = if self.config.lock_position { egui_phosphor::regular::LOCK } else { egui_phosphor::regular::LOCK_OPEN };
                         if ui.button(lock_label)
                             .on_hover_text(if self.config.lock_position { "Position locked" } else { "Position unlocked" })
                             .clicked()
@@ -505,7 +509,7 @@ impl eframe::App for BpsrApp {
                             self.config.save().ok();
                         }
 
-                        let passthrough_label = if self.config.click_passthrough { "👆" } else { "🖱" };
+                        let passthrough_label = if self.config.click_passthrough { egui_phosphor::regular::HAND_POINTING } else { egui_phosphor::regular::MOUSE };
                         if ui.button(passthrough_label)
                             .on_hover_text(if self.config.click_passthrough { "Click pass-through ON" } else { "Click pass-through OFF" })
                             .clicked()
@@ -567,7 +571,7 @@ impl eframe::App for BpsrApp {
 
                     // Character profile card (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let arrow = if self.char_info_expanded { "▼" } else { "▶" };
+                        let arrow = if self.char_info_expanded { egui_phosphor::regular::CARET_DOWN } else { egui_phosphor::regular::CARET_RIGHT };
                         ui.label(egui::RichText::new(arrow).size(10.0).color(ui::theme::TEXT_FAINT));
                         ui.add_space(4.0);
 
@@ -679,7 +683,7 @@ impl eframe::App for BpsrApp {
             } else {
                 let msg = msg.clone();
                 let mut dismiss = false;
-                egui::Window::new("⚔ Match Alert")
+                egui::Window::new(format!("{} Match Alert", egui_phosphor::regular::SWORD))
                     .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
                     .collapsible(false)
                     .resizable(false)

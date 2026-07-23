@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 core              = { path = "../core" }
 egui              = { workspace = true }
+egui-phosphor     = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
 anyhow            = { workspace = true }

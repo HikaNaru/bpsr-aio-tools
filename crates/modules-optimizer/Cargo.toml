@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 core              = { path = "../core" }
 egui              = { workspace = true }
+egui-phosphor     = { workspace = true }
 game              = { path = "../game" }
 crossbeam-channel = { workspace = true }
 rayon             = "1"

@@ -133,7 +133,7 @@ impl Default for ChatModule {
 impl Module for ChatModule {
     fn id(&self)   -> &'static str { "chat" }
     fn name(&self) -> &str         { "Chat" }
-    fn icon(&self) -> &str         { "💬" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::CHAT_CIRCLE }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
@@ -174,7 +174,7 @@ impl Module for ChatModule {
             };
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("⏱ {} — {}", cd.label, format_dur(remaining)))
+                    egui::RichText::new(format!("{} {} — {}", egui_phosphor::regular::TIMER, cd.label, format_dur(remaining)))
                         .strong()
                         .size(18.0)
                         .color(color),
@@ -187,7 +187,7 @@ impl Module for ChatModule {
         if !self.warnings.is_empty() {
             for w in &self.warnings {
                 ui.label(
-                    egui::RichText::new(format!("⚠ {}", w.text))
+                    egui::RichText::new(format!("{} {}", egui_phosphor::regular::WARNING, w.text))
                         .strong()
                         .color(egui::Color32::from_rgb(240, 160, 30)),
                 );
@@ -218,7 +218,7 @@ impl Module for ChatModule {
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.keyword);
-            if !self.keyword.is_empty() && ui.small_button("✖").clicked() {
+            if !self.keyword.is_empty() && ui.small_button(egui_phosphor::regular::X).clicked() {
                 self.keyword.clear();
             }
         });

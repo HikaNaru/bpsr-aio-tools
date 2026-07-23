@@ -27,7 +27,12 @@ pub struct CharStats {
     pub atk_speed_pct:  Option<u32>,
     pub cast_speed_pct: Option<u32>,
     pub crit_damage:    Option<u32>,
+    /// Raw AttrState value (game's EActorState enum). 9 = Dead.
+    pub actor_state:    Option<i32>,
 }
+
+/// EActorState::ActorStateDead, from the game's shared attribute-type enum (AttrState = 11).
+pub const ACTOR_STATE_DEAD: i32 = 9;
 
 impl CharStats {
     pub fn merge(&mut self, other: &CharStats) {
@@ -36,7 +41,7 @@ impl CharStats {
         m!(endurance); m!(armor); m!(crit); m!(crit_pct); m!(haste); m!(haste_pct);
         m!(luck); m!(luck_pct); m!(mastery); m!(mastery_pct); m!(versatility);
         m!(versatility_pct); m!(block); m!(block_pct);
-        m!(atk_speed_pct); m!(cast_speed_pct); m!(crit_damage);
+        m!(atk_speed_pct); m!(cast_speed_pct); m!(crit_damage); m!(actor_state);
     }
 }
 

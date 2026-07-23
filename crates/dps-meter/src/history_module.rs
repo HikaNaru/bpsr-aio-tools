@@ -1,29 +1,58 @@
-use crate::module::{class_name, fmt_damage};
+use crate::module::{entity_category_name, entity_row_color, fmt_damage};
 use core::module::{Module, ModuleContext};
-use encounter_store::{EncounterStore, EncounterSummary, SavedEncounter};
+use encounter_store::{EncounterOutcome, EncounterStore, EncounterSummary, SavedEncounter, SavedPlayerMeter};
 use uuid::Uuid;
 use ui;
 
+const HEADER_FONT_SIZE: f32 = 11.0;
+const CELL_FONT_SIZE:   f32 = 13.0;
+const ROW_HEIGHT:       f32 = 26.0;
+const CELL_HEIGHT:      f32 = 20.0;
+const RANK_COL_WIDTH:   f32 = 28.0;
+const NAME_COL_WIDTH:   f32 = 120.0;
+const CLASS_COL_WIDTH:  f32 = 110.0;
+const ROW_BG_ALPHA:     u8  = 77; // 0.3 opacity
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKey { Damage, DamageTaken, Healing, Hits, CritRate, Deaths }
+
+#[derive(Debug, Clone, Copy)]
+enum ClearScope { All, OlderThanDays(i64) }
+
 pub struct EncounterHistoryModule {
-    store:          EncounterStore,
-    summaries:      Vec<EncounterSummary>,
-    loaded:         bool,
-    detail:         Option<SavedEncounter>,
-    detail_player:  Option<usize>,
-    pending_delete: Option<Uuid>,
-    status:         String,
+    store:           EncounterStore,
+    summaries:       Vec<EncounterSummary>,
+    loaded:          bool,
+    detail:          Option<SavedEncounter>,
+    detail_player:   Option<usize>,
+    pending_delete:  Option<Uuid>,
+    status:          String,
+    sort_key:        SortKey,
+    sort_desc:       bool,
+    players_only:    bool,
+    selected_phase:  Option<usize>,
+    renaming:        Option<Uuid>,
+    rename_buf:      String,
+    confirm_clear:   Option<ClearScope>,
 }
 
 impl EncounterHistoryModule {
     pub fn new() -> Self {
         Self {
-            store:          EncounterStore::open(),
-            summaries:      Vec::new(),
-            loaded:         false,
-            detail:         None,
-            detail_player:  None,
-            pending_delete: None,
-            status:         String::new(),
+            store:           EncounterStore::open(),
+            summaries:       Vec::new(),
+            loaded:          false,
+            detail:          None,
+            detail_player:   None,
+            pending_delete:  None,
+            status:          String::new(),
+            sort_key:        SortKey::Damage,
+            sort_desc:       true,
+            players_only:    false,
+            selected_phase:  None,
+            renaming:        None,
+            rename_buf:      String::new(),
+            confirm_clear:   None,
         }
     }
 
@@ -37,7 +66,7 @@ impl EncounterHistoryModule {
 impl Module for EncounterHistoryModule {
     fn id(&self)   -> &'static str { "history" }
     fn name(&self) -> &str         { "History" }
-    fn icon(&self) -> &str         { "▣" }
+    fn icon(&self) -> &str         { egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
@@ -63,8 +92,8 @@ impl Module for EncounterHistoryModule {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _egui_ctx: &egui::Context) {
-        if let Some(enc) = &self.detail.clone() {
-            render_detail(ui, enc, &mut self.detail_player, &mut self.detail);
+        if self.detail.is_some() {
+            self.render_detail(ui);
             return;
         }
 
@@ -72,9 +101,23 @@ impl Module for EncounterHistoryModule {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("ENCOUNTER HISTORY").strong().size(11.0).color(ui::theme::TEXT_FAINT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("↺").on_hover_text("Refresh").clicked() {
+                if ui.small_button(egui_phosphor::regular::ARROW_CLOCKWISE).on_hover_text("Refresh").clicked() {
                     self.refresh();
                 }
+                ui.menu_button(format!("Clear History {}", egui_phosphor::regular::CARET_DOWN), |ui| {
+                    if ui.button("Older than 7 days").clicked() {
+                        self.confirm_clear = Some(ClearScope::OlderThanDays(7));
+                        ui.close_menu();
+                    }
+                    if ui.button("Older than 30 days").clicked() {
+                        self.confirm_clear = Some(ClearScope::OlderThanDays(30));
+                        ui.close_menu();
+                    }
+                    if ui.button("All time").clicked() {
+                        self.confirm_clear = Some(ClearScope::All);
+                        ui.close_menu();
+                    }
+                });
                 if !self.status.is_empty() {
                     ui.label(
                         egui::RichText::new(&self.status).size(10.0).color(ui::theme::TEXT_FAINT)
@@ -82,6 +125,48 @@ impl Module for EncounterHistoryModule {
                 }
             });
         });
+
+        if let Some(scope) = self.confirm_clear {
+            let mut open = true;
+            let mut do_clear = false;
+            egui::Window::new("Confirm Clear History")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    let label = match scope {
+                        ClearScope::All => "Delete ALL saved encounters? This cannot be undone.".to_string(),
+                        ClearScope::OlderThanDays(d) => format!("Delete all encounters older than {d} days? This cannot be undone."),
+                    };
+                    ui.label(label);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_clear = None;
+                        }
+                        if ui.button(egui::RichText::new("Delete").color(ui::theme::BAD)).clicked() {
+                            do_clear = true;
+                        }
+                    });
+                });
+            if do_clear {
+                // Force-close any open detail view first — its file may be deleted.
+                self.detail = None;
+                self.detail_player = None;
+                let result = match scope {
+                    ClearScope::All => self.store.clear_all().map(|_| ()),
+                    ClearScope::OlderThanDays(d) => {
+                        let cutoff = chrono::Utc::now() - chrono::Duration::days(d);
+                        self.store.clear_before(cutoff).map(|_| ())
+                    }
+                };
+                match result {
+                    Ok(())  => self.refresh(),
+                    Err(e)  => self.status = format!("Clear failed: {e}"),
+                }
+                self.confirm_clear = None;
+            }
+            if !open { self.confirm_clear = None; }
+        }
 
         ui.add_space(4.0);
 
@@ -112,6 +197,7 @@ impl Module for EncounterHistoryModule {
 
         let mut to_load:   Option<Uuid> = None;
         let mut to_delete: Option<Uuid> = None;
+        let mut rename_commit: Option<(Uuid, Option<String>)> = None;
 
         egui::ScrollArea::vertical()
             .id_salt("history_list")
@@ -121,6 +207,7 @@ impl Module for EncounterHistoryModule {
                     let date = sum.started_at.format("%m/%d %H:%M").to_string();
                     let dur  = format_duration(sum.duration_secs);
                     let zone = if sum.scene_name.is_empty() { "Unknown Zone" } else { &sum.scene_name };
+                    let display_name = sum.custom_name.as_deref().unwrap_or(zone);
 
                     let (row_rect, row_resp) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 56.0),
@@ -136,7 +223,13 @@ impl Module for EncounterHistoryModule {
                     ui.painter().rect_filled(row_rect, 8.0, bg);
                     ui.painter().rect_stroke(row_rect, 8.0, egui::Stroke::new(1.0, ui::theme::LINE));
 
-                    // Status diamond
+                    // Status diamond, colored by outcome
+                    let outcome_color = match sum.outcome {
+                        EncounterOutcome::Clear      => ui::theme::GOOD,
+                        EncounterOutcome::Failed     => ui::theme::BAD,
+                        EncounterOutcome::ManualStop => ui::theme::ACCENT2,
+                        EncounterOutcome::Unknown    => ui::theme::TEXT_FAINT,
+                    };
                     let diamond_center = egui::pos2(row_rect.min.x + 18.0, row_rect.center().y);
                     let d_size = 6.0;
                     let diamond = [
@@ -146,17 +239,45 @@ impl Module for EncounterHistoryModule {
                         egui::pos2(diamond_center.x - d_size, diamond_center.y),
                     ];
                     ui.painter().add(egui::Shape::convex_polygon(
-                        diamond.to_vec(), ui::theme::GOOD, egui::Stroke::NONE,
+                        diamond.to_vec(), outcome_color, egui::Stroke::NONE,
                     ));
 
-                    // Zone name + date tag
+                    let outcome_label = match sum.outcome {
+                        EncounterOutcome::Clear      => "Clear",
+                        EncounterOutcome::Failed     => "Failed",
+                        EncounterOutcome::ManualStop => "Manual Stop",
+                        EncounterOutcome::Unknown    => "Unknown",
+                    };
                     ui.painter().text(
-                        egui::pos2(row_rect.min.x + 34.0, row_rect.center().y - 8.0),
-                        egui::Align2::LEFT_CENTER,
-                        zone,
-                        egui::FontId::proportional(13.0),
-                        ui::theme::TEXT,
+                        diamond_center + egui::vec2(0.0, 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        outcome_label,
+                        egui::FontId::proportional(7.5),
+                        outcome_color,
                     );
+
+                    // Zone/custom name + date tag
+                    if self.renaming == Some(sum.id) {
+                        let edit_rect = egui::Rect::from_min_size(
+                            egui::pos2(row_rect.min.x + 34.0, row_rect.center().y - 18.0),
+                            egui::vec2(160.0, 18.0),
+                        );
+                        let resp = ui.put(edit_rect, egui::TextEdit::singleline(&mut self.rename_buf));
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let name = self.rename_buf.trim();
+                            rename_commit = Some((sum.id, if name.is_empty() { None } else { Some(name.to_string()) }));
+                            self.renaming = None;
+                        }
+                        resp.request_focus();
+                    } else {
+                        ui.painter().text(
+                            egui::pos2(row_rect.min.x + 34.0, row_rect.center().y - 8.0),
+                            egui::Align2::LEFT_CENTER,
+                            display_name,
+                            egui::FontId::proportional(13.0),
+                            ui::theme::TEXT,
+                        );
+                    }
                     ui.painter().text(
                         egui::pos2(row_rect.min.x + 34.0, row_rect.center().y + 9.0),
                         egui::Align2::LEFT_CENTER,
@@ -200,20 +321,28 @@ impl Module for EncounterHistoryModule {
                     );
 
                     // Action buttons (right side)
-                    let btn_x = row_rect.max.x - 60.0;
-                    let view_rect = egui::Rect::from_min_size(
+                    let btn_x = row_rect.max.x - 90.0;
+                    let rename_rect = egui::Rect::from_min_size(
                         egui::pos2(btn_x, row_rect.center().y - 10.0),
                         egui::vec2(26.0, 20.0),
                     );
-                    let del_rect = egui::Rect::from_min_size(
+                    let view_rect = egui::Rect::from_min_size(
                         egui::pos2(btn_x + 30.0, row_rect.center().y - 10.0),
                         egui::vec2(26.0, 20.0),
                     );
+                    let del_rect = egui::Rect::from_min_size(
+                        egui::pos2(btn_x + 60.0, row_rect.center().y - 10.0),
+                        egui::vec2(26.0, 20.0),
+                    );
 
-                    if ui.put(view_rect, egui::Button::new("▶").small()).clicked() {
+                    if ui.put(rename_rect, egui::Button::new(egui_phosphor::regular::PENCIL_SIMPLE).small()).clicked() {
+                        self.renaming = Some(sum.id);
+                        self.rename_buf = sum.custom_name.clone().unwrap_or_default();
+                    }
+                    if ui.put(view_rect, egui::Button::new(egui_phosphor::regular::EYE).small()).clicked() {
                         to_load = Some(sum.id);
                     }
-                    if ui.put(del_rect, egui::Button::new("✖").small()).clicked() {
+                    if ui.put(del_rect, egui::Button::new(egui_phosphor::regular::X).small()).clicked() {
                         to_delete = Some(sum.id);
                     }
 
@@ -223,11 +352,19 @@ impl Module for EncounterHistoryModule {
                 }
             });
 
+        if let Some((id, name)) = rename_commit {
+            if let Err(e) = self.store.rename(id, name.clone()) {
+                self.status = format!("Rename failed: {e}");
+            } else if let Some(s) = self.summaries.iter_mut().find(|s| s.id == id) {
+                s.custom_name = name;
+            }
+        }
         if let Some(id) = to_load {
             match self.store.load(id) {
                 Ok(enc) => {
                     self.detail = Some(enc);
                     self.detail_player = None;
+                    self.selected_phase = None;
                 }
                 Err(e) => self.status = format!("Load failed: {e}"),
             }
@@ -238,99 +375,208 @@ impl Module for EncounterHistoryModule {
     }
 }
 
-fn col_header(ui: &mut egui::Ui, label: &str, _width: f32) {
-    ui.label(
-        egui::RichText::new(label)
-            .size(9.5)
-            .color(ui::theme::TEXT_FAINT),
-    );
-}
+impl EncounterHistoryModule {
+    fn render_detail(&mut self, ui: &mut egui::Ui) {
+        let Some(enc) = self.detail.clone() else { return };
 
-// ── Detail view ───────────────────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            if ui.button(format!("{} Back", egui_phosphor::regular::ARROW_LEFT)).clicked() {
+                self.detail = None;
+                self.detail_player = None;
+                return;
+            }
+            let zone = if enc.scene_name.is_empty() { "Unknown Zone" } else { &enc.scene_name };
+            let title = enc.custom_name.as_deref().unwrap_or(zone);
+            ui.strong(title);
+            let outcome_label = match enc.outcome {
+                EncounterOutcome::Clear      => "Clear",
+                EncounterOutcome::Failed     => "Failed",
+                EncounterOutcome::ManualStop => "Manual Stop",
+                EncounterOutcome::Unknown    => "Unknown",
+            };
+            let outcome_color = match enc.outcome {
+                EncounterOutcome::Clear      => ui::theme::GOOD,
+                EncounterOutcome::Failed     => ui::theme::BAD,
+                EncounterOutcome::ManualStop => ui::theme::ACCENT2,
+                EncounterOutcome::Unknown    => ui::theme::TEXT_FAINT,
+            };
+            ui.label(egui::RichText::new(format!(" [{outcome_label}]")).small().color(outcome_color));
+            ui.label(
+                egui::RichText::new(format!(
+                    "  {}  {}",
+                    enc.started_at.format("%Y-%m-%d %H:%M"),
+                    format_duration(enc.duration_secs)
+                ))
+                .small()
+                .color(egui::Color32::from_rgb(140, 140, 160)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.checkbox(&mut self.players_only, "Players Only");
+            });
+        });
 
-fn render_detail(
-    ui: &mut egui::Ui,
-    enc: &SavedEncounter,
-    detail_player: &mut Option<usize>,
-    detail_slot: &mut Option<SavedEncounter>,
-) {
-    ui.horizontal(|ui| {
-        if ui.button("← Back").clicked() {
-            *detail_slot = None;
-            *detail_player = None;
-            return;
-        }
-        let zone = if enc.scene_name.is_empty() { "Unknown Zone" } else { &enc.scene_name };
-        ui.strong(zone);
-        ui.label(
-            egui::RichText::new(format!(
-                "  {}  {}",
-                enc.started_at.format("%Y-%m-%d %H:%M"),
-                format_duration(enc.duration_secs)
-            ))
-            .small()
-            .color(egui::Color32::from_rgb(140, 140, 160)),
-        );
-    });
-    ui.separator();
-
-    if detail_slot.is_none() { return; } // after back button
-
-    let dps_div = enc.duration_secs.max(1.0);
-    let total   = enc.total_damage.max(1);
-
-    let mut sorted: Vec<_> = enc.players.iter().enumerate().collect();
-    sorted.sort_by(|(_, a), (_, b)| b.total_damage.cmp(&a.total_damage));
-
-    egui::ScrollArea::vertical()
-        .id_salt("detail_vscroll")
-        .show(ui, |ui| {
-        egui::ScrollArea::horizontal()
-            .id_salt("detail_hscroll")
-            .show(ui, |ui| {
-            egui::Grid::new("detail_players")
-                .num_columns(16)
-                .striped(true)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    for h in ["#","Player","Class","Spec","AS","SS","DMG%","Hits","Total DMG","DPS","DMG Taken","Total Heal","Heal/s","Crit%","CritDmg%","Luck%"] {
-                        ui.strong(h);
+        if !enc.phases.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("PHASE").size(9.5).color(ui::theme::TEXT_FAINT));
+                if ui.selectable_label(self.selected_phase.is_none(), "All").clicked() {
+                    self.selected_phase = None;
+                }
+                for (i, phase) in enc.phases.iter().enumerate() {
+                    let label = if phase.name.is_empty() { format!("Phase {}", i + 1) } else { phase.name.clone() };
+                    if ui.selectable_label(self.selected_phase == Some(i), label).clicked() {
+                        self.selected_phase = Some(i);
                     }
-                    ui.end_row();
+                }
+            });
+        }
+        ui.separator();
 
-                    for (rank, (i, p)) in sorted.iter().enumerate() {
-                        let dps      = p.total_damage as f64 / dps_div;
-                        let heal_ps  = p.total_healing as f64 / dps_div;
-                        let crit_rt  = if p.hit_count > 0 { p.crit_count as f64 / p.hit_count as f64 * 100.0 } else { 0.0 };
-                        let share    = p.total_damage as f64 / total as f64 * 100.0;
-                        let is_sel   = *detail_player == Some(*i);
+        if self.detail.is_none() { return; }
 
-                        ui.label(format!("{}", rank + 1));
-                        if ui.selectable_label(is_sel, &p.name).clicked() {
-                            *detail_player = if is_sel { None } else { Some(*i) };
-                        }
-                        ui.label(class_name(p.class_id));
-                        ui.label(p.spec.as_deref().unwrap_or("—"));
-                        ui.label(p.ability_score.map(|v| v.to_string()).unwrap_or_else(|| "—".into()));
-                        ui.label(p.season_strength.filter(|&v| v > 0).map(|v| format!("{v}")).unwrap_or_else(|| "—".into()));
-                        ui.label(format!("{:.1}%", share));
-                        ui.label(p.hit_count.to_string());
-                        ui.label(fmt_damage(p.total_damage));
-                        ui.label(fmt_damage(dps as u64));
-                        ui.label(fmt_damage(p.damage_taken));
-                        ui.label(fmt_damage(p.total_healing));
-                        ui.label(fmt_damage(heal_ps as u64));
-                        ui.label(format!("{:.1}%", crit_rt));
-                        ui.label(p.crit_damage.map(|v| format!("{:.1}%", v as f64 / 100.0)).unwrap_or_else(|| "—".into()));
-                        ui.label(p.luck_pct.map(|v| format!("{:.1}%", v as f64 / 100.0)).unwrap_or_else(|| "—".into()));
-                        ui.end_row();
+        let dps_div = enc.duration_secs.max(1.0);
 
-                        // Inline skill breakdown when selected
-                        if *detail_player == Some(*i) && !p.skills.is_empty() {
-                            // span entire row width with vertical content
-                            ui.label("");
+        // Per-row values, resolved either from the whole encounter or a single phase.
+        struct Row<'a> {
+            p:            &'a SavedPlayerMeter,
+            total_damage: u64,
+            hits:         u64,
+            damage_taken: u64,
+            total_healing: u64,
+        }
+
+        let rows: Vec<Row> = enc.players.iter()
+            .filter(|p| !self.players_only || p.is_player)
+            .map(|p| {
+                if let Some(phase_idx) = self.selected_phase {
+                    if let Some(ph) = p.phase_stats.iter().find(|s| s.phase_index == phase_idx) {
+                        return Row { p, total_damage: ph.total_damage, hits: ph.hits, damage_taken: ph.damage_taken, total_healing: ph.total_healing };
+                    }
+                    return Row { p, total_damage: 0, hits: 0, damage_taken: 0, total_healing: 0 };
+                }
+                Row { p, total_damage: p.total_damage, hits: p.hit_count, damage_taken: p.damage_taken, total_healing: p.total_healing }
+            })
+            .collect();
+
+        let total = rows.iter().map(|r| r.total_damage).sum::<u64>().max(1);
+        let taken_total = rows.iter().map(|r| r.damage_taken).sum::<u64>().max(1);
+
+        let mut sorted: Vec<(usize, &Row)> = rows.iter().enumerate().collect();
+        let key = self.sort_key;
+        sorted.sort_by(|(_, a), (_, b)| {
+            let ord = match key {
+                SortKey::Damage      => a.total_damage.cmp(&b.total_damage),
+                SortKey::DamageTaken => a.damage_taken.cmp(&b.damage_taken),
+                SortKey::Healing     => a.total_healing.cmp(&b.total_healing),
+                SortKey::Hits        => a.hits.cmp(&b.hits),
+                SortKey::CritRate    => a.p.crit_count.cmp(&b.p.crit_count),
+                SortKey::Deaths      => a.p.deaths.cmp(&b.p.deaths),
+            };
+            if self.sort_desc { ord.reverse() } else { ord }
+        });
+
+        egui::ScrollArea::vertical()
+            .id_salt("detail_vscroll")
+            .show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt("detail_hscroll")
+                .show(ui, |ui| {
+
+                ui.horizontal(|ui| {
+                    ui.add_sized([RANK_COL_WIDTH, 16.0], egui::Label::new(""));
+                    sort_header(ui, "Player", None, &mut self.sort_key, &mut self.sort_desc, NAME_COL_WIDTH);
+                    plain_header(ui, "Class", CLASS_COL_WIDTH);
+                    plain_header(ui, "Spec", 90.0);
+                    plain_header(ui, "AS", 55.0);
+                    plain_header(ui, "SS", 55.0);
+                    sort_header(ui, "Total DMG", Some(SortKey::Damage), &mut self.sort_key, &mut self.sort_desc, 130.0);
+                    plain_header(ui, "DPS", 75.0);
+                    sort_header(ui, "Hits", Some(SortKey::Hits), &mut self.sort_key, &mut self.sort_desc, 55.0);
+                    sort_header(ui, "Crit%", Some(SortKey::CritRate), &mut self.sort_key, &mut self.sort_desc, 60.0);
+                    plain_header(ui, "Lucky%", 60.0);
+                    plain_header(ui, "Crit DMG", 90.0);
+                    plain_header(ui, "Lucky DMG", 90.0);
+                    plain_header(ui, "CritLucky DMG", 100.0);
+                    plain_header(ui, "Max DPS", 90.0);
+                    plain_header(ui, "Shield", 80.0);
+                    sort_header(ui, "Total Heal", Some(SortKey::Healing), &mut self.sort_key, &mut self.sort_desc, 100.0);
+                    plain_header(ui, "HPS", 75.0);
+                    plain_header(ui, "Eff Heal", 90.0);
+                    plain_header(ui, "Overheal", 90.0);
+                    plain_header(ui, "Crit Heal", 90.0);
+                    plain_header(ui, "Lucky Heal", 90.0);
+                    plain_header(ui, "CritLucky Heal", 100.0);
+                    plain_header(ui, "Max HPS", 90.0);
+                    plain_header(ui, "Max HP", 90.0);
+                    sort_header(ui, "DMG Taken", Some(SortKey::DamageTaken), &mut self.sort_key, &mut self.sort_desc, 100.0);
+                    sort_header(ui, "Deaths", Some(SortKey::Deaths), &mut self.sort_key, &mut self.sort_desc, 60.0);
+                });
+                ui.add_space(2.0);
+
+                for (rank, (i, row)) in sorted.iter().enumerate() {
+                    let p = row.p;
+                    let dps      = row.total_damage as f64 / dps_div;
+                    let heal_ps  = row.total_healing as f64 / dps_div;
+                    let crit_rt  = if row.hits > 0 { p.crit_count as f64 / row.hits as f64 * 100.0 } else { 0.0 };
+                    let lucky_rt = if row.hits > 0 { p.damage_lucky_hits as f64 / row.hits as f64 * 100.0 } else { 0.0 };
+                    let share    = row.total_damage as f64 / total as f64 * 100.0;
+                    let taken_share = row.damage_taken as f64 / taken_total as f64 * 100.0;
+                    let effective_heal = p.total_healing.saturating_sub(p.overheal);
+                    let is_sel   = self.detail_player == Some(*i);
+
+                    let row_color = entity_row_color(p);
+                    let bg = egui::Color32::from_rgba_unmultiplied(row_color.r(), row_color.g(), row_color.b(), ROW_BG_ALPHA);
+
+                    let (row_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(1600.0), ROW_HEIGHT), egui::Sense::hover());
+                    ui.painter().rect_filled(row_rect, 3.0, bg);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_sized([RANK_COL_WIDTH, CELL_HEIGHT], egui::Label::new(
+                                egui::RichText::new(format!("{}", rank + 1)).size(CELL_FONT_SIZE).strong().color(ui::theme::TEXT),
+                            ));
+                            let name = egui::RichText::new(truncate_name(&p.name, 16)).size(CELL_FONT_SIZE).strong().color(ui::theme::TEXT);
+                            if ui.add_sized([NAME_COL_WIDTH, CELL_HEIGHT], egui::SelectableLabel::new(is_sel, name)).clicked() {
+                                self.detail_player = if is_sel { None } else { Some(*i) };
+                            }
+                            fixed_cell(ui, CLASS_COL_WIDTH, entity_category_name(p), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, p.spec.as_deref().unwrap_or("—"), CELL_FONT_SIZE);
+                            fixed_cell(ui, 55.0, &p.ability_score.map(|v| v.to_string()).unwrap_or_else(|| "—".into()), CELL_FONT_SIZE);
+                            fixed_cell(ui, 55.0, &p.season_strength.filter(|&v| v > 0).map(|v| format!("{v}")).unwrap_or_else(|| "—".into()), CELL_FONT_SIZE);
+                            fixed_cell(ui, 130.0, &format!("{} ({:.1}%)", fmt_damage(row.total_damage), share), CELL_FONT_SIZE);
+                            fixed_cell(ui, 75.0, &fmt_damage(dps as u64), CELL_FONT_SIZE);
+                            fixed_cell(ui, 55.0, &row.hits.to_string(), CELL_FONT_SIZE);
+                            fixed_cell(ui, 60.0, &format!("{:.1}%", crit_rt), CELL_FONT_SIZE);
+                            fixed_cell(ui, 60.0, &format!("{:.1}%", lucky_rt), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.damage_crit_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.damage_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &fmt_damage(p.damage_crit_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.max_hit), CELL_FONT_SIZE);
+                            fixed_cell(ui, 80.0, &fmt_damage(p.shield_gain), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &fmt_damage(row.total_healing), CELL_FONT_SIZE);
+                            fixed_cell(ui, 75.0, &fmt_damage(heal_ps as u64), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(effective_heal), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.overheal), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_crit_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &fmt_damage(p.heal_crit_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_max_hit), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &p.max_hp.map(|v| fmt_damage(v.max(0) as u64)).unwrap_or_else(|| "—".into()), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &format!("{} ({:.1}%)", fmt_damage(row.damage_taken), taken_share), CELL_FONT_SIZE);
+                            fixed_cell(ui, 60.0, &p.deaths.to_string(), CELL_FONT_SIZE);
+                        });
+                    });
+                    ui.add_space(1.0);
+
+                    // Inline skill breakdown + gear/Imagines when selected
+                    if is_sel {
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
                             ui.vertical(|ui| {
-                                let mut skills = p.skills.clone();
+                                let mut skills = if let Some(phase_idx) = self.selected_phase {
+                                    p.phase_stats.iter().find(|s| s.phase_index == phase_idx)
+                                        .map(|s| s.skills.clone()).unwrap_or_default()
+                                } else {
+                                    p.skills.clone()
+                                };
                                 skills.sort_by(|a, b| b.total_dmg.cmp(&a.total_dmg));
                                 egui::Grid::new(format!("skills_{i}"))
                                     .num_columns(5)
@@ -353,14 +599,78 @@ fn render_detail(
                                             ui.end_row();
                                         }
                                     });
+
+                                if let Some(gear) = &p.gear {
+                                    ui.add_space(6.0);
+                                    ui.collapsing(egui::RichText::new("Gear & Imagines").small().strong(), |ui| {
+                                        if gear.gear.is_empty() && gear.imagines.is_empty() {
+                                            ui.label(egui::RichText::new("Not available").small().color(ui::theme::TEXT_FAINT));
+                                        }
+                                        for slot in &gear.gear {
+                                            let name = if slot.item_name.is_empty() { format!("Item #{}", slot.item_id) } else { slot.item_name.clone() };
+                                            ui.label(egui::RichText::new(format!("Slot {}: {}", slot.slot, name)).small());
+                                        }
+                                        for im in &gear.imagines {
+                                            let name = if im.name.is_empty() { format!("Skill #{}", im.skill_id) } else { im.name.clone() };
+                                            ui.label(egui::RichText::new(format!("Imagine: {} (Tier {})", name, im.tier)).small());
+                                        }
+                                    });
+                                } else if p.is_player {
+                                    ui.label(egui::RichText::new("Gear: not available").small().color(ui::theme::TEXT_FAINT));
+                                }
                             });
-                            for _ in 0..14 { ui.label(""); }
-                            ui.end_row();
-                        }
+                        });
+                        ui.add_space(4.0);
                     }
-                });
+                }
+            });
         });
-    });
+    }
+}
+
+fn col_header(ui: &mut egui::Ui, label: &str, _width: f32) {
+    ui.label(
+        egui::RichText::new(label)
+            .size(HEADER_FONT_SIZE)
+            .color(ui::theme::TEXT),
+    );
+}
+
+fn plain_header(ui: &mut egui::Ui, label: &str, width: f32) {
+    ui.add_sized([width, 18.0], egui::Label::new(egui::RichText::new(label).size(HEADER_FONT_SIZE).color(ui::theme::TEXT)));
+}
+
+fn sort_header(ui: &mut egui::Ui, label: &str, key: Option<SortKey>, cur: &mut SortKey, desc: &mut bool, width: f32) {
+    let Some(key) = key else { return plain_header(ui, label, width); };
+    let active = *cur == key;
+    let arrow = if active {
+        if *desc { format!(" {}", egui_phosphor::regular::SORT_DESCENDING) } else { format!(" {}", egui_phosphor::regular::SORT_ASCENDING) }
+    } else {
+        String::new()
+    };
+    let text = egui::RichText::new(format!("{label}{arrow}"))
+        .size(HEADER_FONT_SIZE)
+        .color(if active { ui::theme::ACCENT } else { ui::theme::TEXT });
+    if ui.add_sized([width, 18.0], egui::Button::new(text).small().fill(egui::Color32::TRANSPARENT)).clicked() {
+        if active { *desc = !*desc; } else { *cur = key; *desc = true; }
+    }
+}
+
+fn fixed_cell(ui: &mut egui::Ui, width: f32, text: &str, size: f32) {
+    ui.add_sized([width, CELL_HEIGHT], egui::Label::new(egui::RichText::new(text).size(size).strong().color(ui::theme::TEXT)));
+}
+
+/// Truncates a display name to at most `max_chars` characters, appending an
+/// ellipsis, so long monster/player names never blow past their fixed column
+/// width and shove later columns out of alignment with the header.
+fn truncate_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() > max_chars {
+        let mut s: String = name.chars().take(max_chars.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    } else {
+        name.to_string()
+    }
 }
 
 fn format_duration(secs: f64) -> String {
