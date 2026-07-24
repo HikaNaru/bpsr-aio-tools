@@ -55,9 +55,9 @@ pub struct DpsMeterModule {
     shield_seen:      HashMap<EntityId, std::collections::HashSet<i64>>,
     gear_cache:       HashMap<EntityId, Vec<game::event::EquipSlot>>,
     loadout_cache:    HashMap<EntityId, Vec<game::event::SkillLoadoutEntry>>,
+    gear_panel_state: ui::widgets::gear_panel::GearPanelState,
     // Phase-boundary detection (see plan Milestone 5 remaining sub-task).
     target_progress:      HashMap<i32, (i32, i32)>, // target_id -> (nums, complete)
-    completed_targets:    std::collections::HashSet<i32>,
     current_phase_target: Option<i32>,
     last_phase_id:        Option<i32>,
     pending:          Vec<GameEvent>,
@@ -93,8 +93,8 @@ impl DpsMeterModule {
             shield_seen:     HashMap::new(),
             gear_cache:      HashMap::new(),
             loadout_cache:   HashMap::new(),
+            gear_panel_state: ui::widgets::gear_panel::GearPanelState::default(),
             target_progress:      HashMap::new(),
-            completed_targets:    std::collections::HashSet::new(),
             current_phase_target: None,
             last_phase_id:        None,
             pending:         Vec::new(),
@@ -248,8 +248,12 @@ impl Module for DpsMeterModule {
                     self.stats_cache.remove(id);
                     self.dead_players.remove(id);
                     self.shield_seen.remove(id);
-                    self.gear_cache.remove(id);
-                    self.loadout_cache.remove(id);
+                    // gear_cache/loadout_cache are deliberately NOT cleared here: they're
+                    // identity data (what someone is wearing), not live-presence data, and
+                    // don't change just because the entity left AOI render range. Other
+                    // players routinely despawn/respawn while still in your party — dropping
+                    // their gear here is why it only ever "worked" for the local player, who
+                    // never despawns. Cleared on zone change instead (session boundary).
                 }
                 GameEvent::EntityStats { id, stats } => {
                     let prev_state = self.stats_cache.get(id).and_then(|s| s.actor_state);
@@ -294,9 +298,15 @@ impl Module for DpsMeterModule {
                     }
                 }
                 GameEvent::EquipData { id, slots } => {
+                    tracing::debug!("gear snapshot id={:?} gear_slots={}", id, slots.len());
                     self.gear_cache.insert(*id, slots.clone());
                 }
                 GameEvent::SkillLoadout { id, skills } => {
+                    tracing::debug!(
+                        "loadout snapshot id={:?} skill_ids={:?}",
+                        id,
+                        skills.iter().map(|s| s.skill_id).collect::<Vec<_>>()
+                    );
                     self.loadout_cache.insert(*id, skills.clone());
                 }
                 GameEvent::ZoneChange { zone_id, zone_name } => {
@@ -313,9 +323,13 @@ impl Module for DpsMeterModule {
                         // New zone/instance — stale objective progress from the
                         // previous dungeon must not leak into phase detection here.
                         self.target_progress.clear();
-                        self.completed_targets.clear();
                         self.current_phase_target = None;
                         self.last_phase_id = None;
+                        // Gear/loadout are session-scoped identity data (see EntityDespawn
+                        // above for why they survive individual despawns) — reset at the
+                        // actual session/instance boundary instead.
+                        self.gear_cache.clear();
+                        self.loadout_cache.clear();
                     }
                 }
                 GameEvent::DungeonState { .. } => {
@@ -330,8 +344,8 @@ impl Module for DpsMeterModule {
                         tracing::debug!("dungeon target {} nums={} complete={}", t.target_id, t.nums, t.complete);
                         let is_new_objective = t.complete == 0 && t.nums == 0;
                         if is_new_objective
+                            && self.current_phase_target.is_some()
                             && self.current_phase_target != Some(t.target_id)
-                            && !self.completed_targets.is_empty()
                         {
                             if let Some(enc) = &mut self.state.active {
                                 let phase_name = format!("Phase {}", enc.phases.len() + 2);
@@ -340,9 +354,6 @@ impl Module for DpsMeterModule {
                             self.current_phase_target = Some(t.target_id);
                         } else if self.current_phase_target.is_none() {
                             self.current_phase_target = Some(t.target_id);
-                        }
-                        if t.complete == 1 {
-                            self.completed_targets.insert(t.target_id);
                         }
                         self.target_progress.insert(t.target_id, (t.nums, t.complete));
                     }
@@ -425,11 +436,14 @@ impl Module for DpsMeterModule {
         let finished: Vec<_> = self.state.newly_finished.drain(..).collect();
         for enc in &finished {
             self.save_encounter(enc);
+            let player_count = enc.players.keys()
+                .filter(|id| self.is_player.get(id).copied().unwrap_or(false))
+                .count();
             if ctx.config.discord_enabled
                 && !ctx.config.discord_webhook_url.is_empty()
-                && enc.players.len() >= ctx.config.discord_min_players
+                && player_count >= ctx.config.discord_min_players
             {
-                let report = to_discord_report(enc, &self.stats_cache, &self.classes);
+                let report = to_discord_report(enc, &self.stats_cache, &self.classes, &self.is_player);
                 core::discord::send_report_async(ctx.config.discord_webhook_url.clone(), report);
             }
         }
@@ -705,9 +719,12 @@ impl Module for DpsMeterModule {
                                         }
                                     });
                                 ui.add_space(10.0);
-                                let stats  = self.stats_cache.get(&sel_id);
-                                let pinned = &mut self.pinned_player;
-                                render_inspector(ui, player, stats, elapsed, sel_id, pinned);
+                                let stats   = self.stats_cache.get(&sel_id);
+                                let gear    = self.gear_cache.get(&sel_id);
+                                let loadout = self.loadout_cache.get(&sel_id);
+                                let pinned  = &mut self.pinned_player;
+                                let panel_state = &mut self.gear_panel_state;
+                                render_inspector(ui, player, stats, elapsed, sel_id, pinned, gear, loadout, panel_state);
                             } else {
                                 if self.pinned_player != Some(sel_id) { *new_sel = Some(None); }
                                 ui.label(egui::RichText::new("Player not in this encounter.").size(11.0).color(ui::theme::TEXT_FAINT));
@@ -885,12 +902,15 @@ impl DpsMeterModule {
 // ── Inspector panel ───────────────────────────────────────────────────────────
 
 fn render_inspector(
-    ui:       &mut egui::Ui,
-    player:   &PlayerMeter,
-    stats:    Option<&CharStats>,
-    duration: f64,
-    id:       EntityId,
-    pinned:   &mut Option<EntityId>,
+    ui:          &mut egui::Ui,
+    player:      &PlayerMeter,
+    stats:       Option<&CharStats>,
+    duration:    f64,
+    id:          EntityId,
+    pinned:      &mut Option<EntityId>,
+    gear:        Option<&Vec<game::event::EquipSlot>>,
+    loadout:     Option<&Vec<game::event::SkillLoadoutEntry>>,
+    panel_state: &mut ui::widgets::gear_panel::GearPanelState,
 ) {
     let is_pinned = *pinned == Some(id);
 
@@ -1000,6 +1020,20 @@ fn render_inspector(
             });
     }
 
+    // ── Imagines & Gear ──────────────────────────────────────────────────────
+    if gear.is_some() || loadout.is_some() {
+        ui.add_space(6.0);
+        let (slots, imagines) = to_gear_panel_views(gear, loadout);
+
+        ui.label(egui::RichText::new("IMAGINES").strong().size(11.0).color(ui::theme::TEXT));
+        ui.add_space(4.0);
+        ui::widgets::gear_panel::render_imagines(ui, panel_state, &imagines);
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("GEAR").strong().size(11.0).color(ui::theme::TEXT));
+        ui.add_space(4.0);
+        ui::widgets::gear_panel::render_gear(ui, panel_state, &slots);
+    }
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -1073,6 +1107,25 @@ fn build_gear_info(
             name:     core::DATA.skill_name(s.skill_id as u32).map(|n| n.to_string()).unwrap_or_default(),
         }).collect()).unwrap_or_default();
     Some(encounter_store::SavedGearInfo { gear, imagines })
+}
+
+fn to_gear_panel_views(
+    slots:  Option<&Vec<game::event::EquipSlot>>,
+    skills: Option<&Vec<game::event::SkillLoadoutEntry>>,
+) -> (Vec<ui::widgets::gear_panel::GearSlotView>, Vec<ui::widgets::gear_panel::ImagineView>) {
+    let gear = slots.map(|v| v.iter().map(|s| ui::widgets::gear_panel::GearSlotView {
+        slot:      s.slot,
+        item_id:   s.item_id,
+        item_name: core::DATA.item_name(s.item_id).map(|n| n.to_string()).unwrap_or_default(),
+    }).collect()).unwrap_or_default();
+    let imagines = skills.map(|v| v.iter()
+        .filter(|s| core::DATA.skill_is_imagine(s.skill_id as u32))
+        .map(|s| ui::widgets::gear_panel::ImagineView {
+            skill_id: s.skill_id,
+            tier:     s.tier,
+            name:     core::DATA.skill_name(s.skill_id as u32).map(|n| n.to_string()).unwrap_or_default(),
+        }).collect()).unwrap_or_default();
+    (gear, imagines)
 }
 
 /// Splits a player's timestamped hit log into per-phase stat buckets (exact
@@ -1189,12 +1242,13 @@ fn to_saved_player(
 
 // ── Discord report builder ────────────────────────────────────────────────────
 
-fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>, classes: &HashMap<EntityId, u32>) -> core::discord::DiscordReport {
+fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>, classes: &HashMap<EntityId, u32>, is_player: &HashMap<EntityId, bool>) -> core::discord::DiscordReport {
     let age = Instant::now().duration_since(enc.start_time);
     let started_at_secs = chrono::Utc::now().timestamp() - age.as_secs() as i64;
     let duration = enc.elapsed().as_secs_f64().max(1.0);
 
     let mut players: Vec<_> = enc.players.values()
+        .filter(|p| is_player.get(&p.entity_id).copied().unwrap_or(false))
         .map(|p| {
             let stats    = stats_cache.get(&p.entity_id);
             let class_id = classes.get(&p.entity_id).copied();
@@ -1488,6 +1542,23 @@ fn skill_spec(skill_id: u32) -> Option<&'static str> {
     }
 }
 
+/// Fallback class lookup when class_id was never observed via attr-sync but
+/// spec was already derived from combat damage (spec implies class 1:1).
+fn spec_to_class_id(spec: &str) -> Option<u32> {
+    match spec {
+        "Iaido" | "Moonstrike" => Some(1),
+        "Icicle" | "Frostbeam" => Some(2),
+        "Formless" | "Crimson" => Some(3),
+        "Vanguard" | "Skyward" => Some(4),
+        "Smite" | "Lifebind" => Some(5),
+        "Earthfort" | "Block" => Some(9),
+        "Wildpack" | "Falconry" => Some(11),
+        "Recovery" | "Shield" => Some(12),
+        "Dissonance" | "Concerto" => Some(13),
+        _ => None,
+    }
+}
+
 fn player_spec(player: &PlayerMeter) -> Option<&'static str> {
     let mut counts: HashMap<&'static str, u64> = HashMap::new();
     for (id, sk) in &player.skill_breakdown {
@@ -1552,10 +1623,20 @@ pub fn monster_type_color_egui(monster_type: Option<i32>) -> egui::Color32 {
 
 /// Class/category name for a saved row — player profession or monster tier.
 pub fn entity_category_name(p: &SavedPlayerMeter) -> &'static str {
-    if p.is_player { class_name(p.class_id) } else { monster_type_name(p.monster_type) }
+    if p.is_player {
+        let class_id = p.class_id.or_else(|| spec_to_class_id(p.spec.as_deref()?));
+        class_name(class_id)
+    } else {
+        monster_type_name(p.monster_type)
+    }
 }
 
 /// Row tint color — player class color or monster tier color.
 pub fn entity_row_color(p: &SavedPlayerMeter) -> egui::Color32 {
-    if p.is_player { class_color_egui(p.class_id) } else { monster_type_color_egui(p.monster_type) }
+    if p.is_player {
+        let class_id = p.class_id.or_else(|| spec_to_class_id(p.spec.as_deref()?));
+        class_color_egui(class_id)
+    } else {
+        monster_type_color_egui(p.monster_type)
+    }
 }

@@ -26,6 +26,26 @@ pub const LINE_ACCENT:  Color32 = Color32::from_rgba_premultiplied(91, 140, 255,
 // Legacy aliases used elsewhere
 pub const DAMAGE_BAR:   Color32 = ACCENT;
 
+// Gear item quality ramp (ItemEntry.quality 0-5), matching BPSR-ZDPS's
+// White/Green/Blue/Purple/Gold/Red convention.
+pub const QUALITY_COMMON:    Color32 = Color32::from_rgb(232, 234, 239); // 0 — same as TEXT
+pub const QUALITY_UNCOMMON:  Color32 = Color32::from_rgb(95,  191, 138); // 1 — green
+pub const QUALITY_RARE:      Color32 = Color32::from_rgb(91,  140, 255); // 2 — blue
+pub const QUALITY_EPIC:      Color32 = Color32::from_rgb(178, 122, 255); // 3 — purple
+pub const QUALITY_LEGENDARY: Color32 = Color32::from_rgb(217, 168, 90);  // 4 — gold
+pub const QUALITY_MYTHIC:    Color32 = Color32::from_rgb(217, 107, 107); // 5 — red
+
+pub fn quality_color(quality: i32) -> Color32 {
+    match quality {
+        1 => QUALITY_UNCOMMON,
+        2 => QUALITY_RARE,
+        3 => QUALITY_EPIC,
+        4 => QUALITY_LEGENDARY,
+        5 => QUALITY_MYTHIC,
+        _ => QUALITY_COMMON,
+    }
+}
+
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = Visuals::dark();
     visuals.panel_fill           = BG_DARK;

@@ -31,12 +31,37 @@ pub struct BpsrApp {
     class_textures: HashMap<u32, egui::TextureHandle>,
 }
 
+/// Merges a bundled CJK-subset font into the Proportional family as a fallback,
+/// after the default Latin font, so any character the Latin font lacks a glyph for
+/// (Chinese/Japanese names/descriptions this app has no English source for) renders
+/// as a real glyph instead of a tofu box. Loaded from disk like every other asset
+/// (`data/Fonts/...`, same convention as `data/Images/...`) — optional, skipped with
+/// a log warning if the file isn't present rather than failing startup.
+fn add_cjk_fallback_font(fonts: &mut egui::FontDefinitions) {
+    let path = core::data_tables::data_dir().join("Fonts").join("NotoSansCJK-SC-Subset.otf");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("CJK fallback font missing ({}): {e}", path.display());
+            return;
+        }
+    };
+
+    const KEY: &str = "cjk_fallback";
+    fonts.font_data.insert(KEY.to_owned(), egui::FontData::from_owned(bytes).into());
+    fonts.families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push(KEY.to_owned());
+}
+
 impl BpsrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         ui::theme::apply(&cc.egui_ctx);
 
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        add_cjk_fallback_font(&mut fonts);
         cc.egui_ctx.set_fonts(fonts);
 
         let mut config = AppConfig::load();

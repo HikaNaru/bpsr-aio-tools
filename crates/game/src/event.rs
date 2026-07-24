@@ -6,6 +6,8 @@ use crate::entity::CharStats;
 
 #[derive(Debug, Clone)]
 pub struct PlayerModule {
+    /// Item's ConfigId — resolves quality tier / mod type / display name / icon via `core::DATA`.
+    pub config_id: i32,
     pub effects: Vec<ModuleEffect>,
 }
 

@@ -159,7 +159,8 @@ fn parse_notify_social_data(msg: pb::NotifySocialData) -> Vec<GameEvent> {
         .and_then(|s| s.scene_data);
     if let Some(s) = scene {
         if s.level_map_id != 0 {
-            let name = zone_name(s.level_map_id)
+            let name = bpsr_core::DATA.dungeon_name(&s.level_map_id.to_string())
+                .or_else(|| zone_name(s.level_map_id))
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| format!("Zone {}", s.level_map_id));
             return vec![GameEvent::ZoneChange {
@@ -607,10 +608,6 @@ fn parse_sync_container_data(msg: pb::SyncContainerData) -> Vec<GameEvent> {
     let Some(v_data) = msg.v_data else { return vec![] };
     if v_data.char_id == 0 { return vec![] }
 
-    if let Ok(s) = std::fs::write("/tmp/bpsr_sync_container.txt", format!("{v_data:#?}")) {
-        let _ = s;
-    }
-
     let entity_id = EntityId(v_data.char_id as u64);
     let mut events = Vec::new();
 
@@ -635,6 +632,22 @@ fn parse_sync_container_data(msg: pb::SyncContainerData) -> Vec<GameEvent> {
     let modules = extract_modules(v_data.item_package.as_ref(), v_data.r#mod.as_ref());
     if !modules.is_empty() {
         events.push(GameEvent::PlayerInventory { id: entity_id, modules });
+    }
+
+    // Extract equipped gear: cross-reference each equip slot's item_uuid
+    // against the gear bag (package index 2) to resolve the item's ConfigId.
+    if let (Some(equip), Some(item_package)) = (&v_data.equip, &v_data.item_package) {
+        if let Some(gear_bag) = item_package.packages.get(&2) {
+            let slots: Vec<EquipSlot> = equip.equip_list.values()
+                .filter_map(|info| {
+                    gear_bag.items.get(&(info.item_uuid as i64))
+                        .map(|item| EquipSlot { slot: info.equip_slot, item_id: item.config_id })
+                })
+                .collect();
+            if !slots.is_empty() {
+                events.push(GameEvent::EquipData { id: entity_id, slots });
+            }
+        }
     }
 
     events
@@ -670,7 +683,7 @@ fn extract_modules(
                 }
             }
             if !effects.is_empty() {
-                modules.push(PlayerModule { effects });
+                modules.push(PlayerModule { config_id: item.config_id, effects });
             }
         }
     }
@@ -799,19 +812,15 @@ fn parse_npc_attrs(entity_id: EntityId, ent_type: i32, attrs: Vec<pb::Attr>) -> 
     events
 }
 
-/// Decodes a raw attribute payload that is a back-to-back sequence of
-/// length-delimited protobuf messages (the wire shape used by list-typed
-/// attributes such as AttrShieldList/AttrEquipData/AttrSkillLevelIdList).
-fn decode_message_list<M: prost::Message + Default>(data: &[u8]) -> Vec<M> {
-    let mut buf = data;
-    let mut out = Vec::new();
-    while !buf.is_empty() {
-        match M::decode_length_delimited(&mut buf) {
-            Ok(msg) => out.push(msg),
-            Err(_) => break,
-        }
+/// Hex-dumps up to the first 64 bytes of a payload, for protocol-framing debugging.
+fn hex_preview(data: &[u8]) -> String {
+    let take = data.len().min(64);
+    let mut s = String::with_capacity(take * 3);
+    for b in &data[..take] {
+        s.push_str(&format!("{b:02x} "));
     }
-    out
+    if data.len() > take { s.push_str("..."); }
+    s
 }
 
 fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEvent> {
@@ -825,7 +834,8 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
         match attr.id {
             // AttrShieldList = 60050
             60050 => {
-                let shields: Vec<ShieldEntry> = decode_message_list::<pb::ShieldInfo>(&attr.raw_data)
+                let shields: Vec<ShieldEntry> = pb::ShieldInfoList::decode(attr.raw_data.as_slice())
+                    .map(|w| w.items).unwrap_or_default()
                     .into_iter()
                     .map(|s| ShieldEntry { uuid: s.uuid, value: s.value, initial_value: s.initial_value })
                     .collect();
@@ -833,16 +843,26 @@ fn parse_player_attrs(entity_id: EntityId, attrs: Vec<pb::Attr>) -> Vec<GameEven
             }
             // AttrEquipData = 200
             200 => {
-                let slots: Vec<EquipSlot> = decode_message_list::<pb::EquipNine>(&attr.raw_data)
-                    .into_iter()
+                let decoded = pb::EquipNineList::decode(attr.raw_data.as_slice())
+                    .map(|w| w.items).unwrap_or_default();
+                debug!(
+                    "AttrEquipData raw_len={} decoded_count={} raw_hex={}",
+                    attr.raw_data.len(), decoded.len(), hex_preview(&attr.raw_data)
+                );
+                let slots: Vec<EquipSlot> = decoded.into_iter()
                     .map(|e| EquipSlot { slot: e.slot, item_id: e.equip_id })
                     .collect();
                 events.push(GameEvent::EquipData { id: entity_id, slots });
             }
             // AttrSkillLevelIdList = 116
             116 => {
-                let skills: Vec<SkillLoadoutEntry> = decode_message_list::<pb::SkillLevelInfo>(&attr.raw_data)
-                    .into_iter()
+                let decoded = pb::SkillLevelInfoList::decode(attr.raw_data.as_slice())
+                    .map(|w| w.items).unwrap_or_default();
+                debug!(
+                    "AttrSkillLevelIdList raw_len={} decoded_count={} raw_hex={}",
+                    attr.raw_data.len(), decoded.len(), hex_preview(&attr.raw_data)
+                );
+                let skills: Vec<SkillLoadoutEntry> = decoded.into_iter()
                     .map(|s| SkillLoadoutEntry { skill_id: s.skill_id, current_level: s.current_level, tier: s.remodel_level })
                     .collect();
                 events.push(GameEvent::SkillLoadout { id: entity_id, skills });

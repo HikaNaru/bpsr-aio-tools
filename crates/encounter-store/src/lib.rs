@@ -324,7 +324,7 @@ fn summary_of(enc: &SavedEncounter) -> EncounterSummary {
         scene_name:      enc.scene_name.clone(),
         started_at:      enc.started_at,
         duration_secs:   enc.duration_secs,
-        player_count:    enc.players.len(),
+        player_count:    enc.players.iter().filter(|p| p.is_player).count(),
         total_damage:    enc.total_damage,
         top_player_name: top_name,
         top_player_dps:  top_dps,

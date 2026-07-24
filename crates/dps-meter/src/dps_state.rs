@@ -102,6 +102,11 @@ impl DpsState {
                 }
             },
             GameEvent::ZoneChange { .. } => {
+                if let Some(enc) = &mut self.active {
+                    if enc.outcome == EncounterOutcome::Unknown {
+                        enc.outcome = EncounterOutcome::Clear;
+                    }
+                }
                 self.finish_active();
                 self.in_dungeon = false;
             }

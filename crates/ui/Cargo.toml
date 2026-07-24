@@ -8,3 +8,4 @@ core      = { path = "../core" }
 egui          = { workspace = true }
 egui_plot     = { workspace = true }
 egui-phosphor = { workspace = true }
+image         = { workspace = true }

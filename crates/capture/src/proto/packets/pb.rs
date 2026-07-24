@@ -55,10 +55,30 @@ pub struct CharSerialize {
     pub char_base: Option<CharBaseInfo>,
     #[prost(message, optional, tag = "7")]
     pub item_package: Option<ItemPackage>,
+    #[prost(message, optional, tag = "12")]
+    pub equip: Option<EquipList>,
     #[prost(message, optional, tag = "57")]
     pub r#mod: Option<Mod>,
     #[prost(message, optional, tag = "61")]
     pub profession_list: Option<ProfessionList>,
+}
+
+/// EquipInfo — one entry of CharSerialize.equip.equip_list (slot -> equip info).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipInfo {
+    #[prost(int32, tag = "1")]
+    pub equip_slot: i32,
+    #[prost(uint64, tag = "2")]
+    pub item_uuid: u64,
+}
+
+/// CharSerialize.equip (field 12) — map of equip slot -> EquipInfo, cross-
+/// referenced against ItemPackage.packages[2] (gear bag) by item_uuid to
+/// resolve the actual equipped item's ConfigId.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipList {
+    #[prost(map = "int32, message", tag = "1")]
+    pub equip_list: std::collections::HashMap<i32, EquipInfo>,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -81,6 +101,8 @@ pub struct ModNewAttr {
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Item {
+    #[prost(int32, tag = "2")]
+    pub config_id: i32,
     #[prost(message, optional, tag = "13")]
     pub mod_new_attr: Option<ModNewAttr>,
 }
@@ -165,8 +187,16 @@ pub struct ShieldInfo {
     pub max_value: i64,
 }
 
-/// AttrEquipData (attr id 200) raw bytes decode to a back-to-back sequence
-/// of these length-delimited messages (one per equipped item slot).
+/// AttrShieldList (attr id 60050) raw bytes decode as this wrapper message —
+/// a standard protobuf `repeated ShieldInfo items = 1` field, each entry
+/// carrying its own field-1 tag byte before its length-delimited payload
+/// (confirmed against a real capture's hex dump).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShieldInfoList {
+    #[prost(message, repeated, tag = "1")]
+    pub items: Vec<ShieldInfo>,
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EquipNine {
     #[prost(int32, tag = "1")]
@@ -175,8 +205,14 @@ pub struct EquipNine {
     pub equip_id: i32,
 }
 
-/// AttrSkillLevelIdList (attr id 116) raw bytes decode to a back-to-back
-/// sequence of these length-delimited messages (one per learned skill).
+/// AttrEquipData (attr id 200) raw bytes decode as this wrapper message —
+/// see `ShieldInfoList` for the wire-shape rationale.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipNineList {
+    #[prost(message, repeated, tag = "1")]
+    pub items: Vec<EquipNine>,
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SkillLevelInfo {
     #[prost(int32, tag = "1")]
@@ -185,6 +221,14 @@ pub struct SkillLevelInfo {
     pub current_level: i32,
     #[prost(int32, tag = "3")]
     pub remodel_level: i32,
+}
+
+/// AttrSkillLevelIdList (attr id 116) raw bytes decode as this wrapper
+/// message — see `ShieldInfoList` for the wire-shape rationale.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SkillLevelInfoList {
+    #[prost(message, repeated, tag = "1")]
+    pub items: Vec<SkillLevelInfo>,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]

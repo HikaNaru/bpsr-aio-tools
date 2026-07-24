@@ -25,6 +25,33 @@ pub struct StatPriority {
     pub mode: StatMode,
 }
 
+/// Which module quality tiers are eligible for the solver. Tier 2 (Excellent) and
+/// tier 3 (EXT) are both gated by `excellent` — the reference UI only exposes 3
+/// checkboxes (Basic/Advanced/Excellent) for the game's 4 actual quality tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QualityFilter {
+    pub basic:     bool,
+    pub advanced:  bool,
+    pub excellent: bool,
+}
+
+impl Default for QualityFilter {
+    fn default() -> Self {
+        Self { basic: true, advanced: true, excellent: true }
+    }
+}
+
+impl QualityFilter {
+    pub fn allows(&self, tier: u8) -> bool {
+        match tier {
+            0 => self.basic,
+            1 => self.advanced,
+            2 | 3 => self.excellent,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SolverConfig {
     /// Ordered list of stat priorities (highest priority first).
@@ -34,15 +61,17 @@ pub struct SolverConfig {
     /// Give unspecified stats a small weight of 1.
     pub value_all_stats: bool,
     pub beam_width: usize,
+    pub quality_filter: QualityFilter,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
             priorities: vec![],
-            num_modules: 4,
+            num_modules: 5,
             value_all_stats: true,
             beam_width: DEFAULT_BEAM_WIDTH,
+            quality_filter: QualityFilter::default(),
         }
     }
 }
@@ -56,6 +85,11 @@ pub struct ModComboResult {
     /// All stats (effect_id, total) sorted by effect_id.
     pub all_stats: Vec<(i32, u8)>,
     pub score: i32,
+    /// Secondary combat-score number ("Ability Score" in the reference UI) — sum of
+    /// each stat's game-balance FightValue at its resolved breakpoint, plus the
+    /// total-link-level bonus. Distinct from `score`, which is the internal beam-search
+    /// heuristic used to rank/select combos.
+    pub ability_score: i32,
 }
 
 // ── Internal ─────────────────────────────────────────────────────────────────
@@ -105,10 +139,22 @@ impl ScoreTables {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-pub fn optimize(modules: &[PlayerModule], config: &SolverConfig) -> Vec<ModComboResult> {
-    if modules.is_empty() || config.num_modules == 0 {
+pub fn optimize(all_modules: &[PlayerModule], config: &SolverConfig) -> Vec<ModComboResult> {
+    if all_modules.is_empty() || config.num_modules == 0 {
         return vec![];
     }
+
+    // Quality pre-filter — keep an index map back to `all_modules` so the final
+    // `ModComboResult.module_indices` can still index into the caller's original,
+    // unfiltered slice (needed so the UI can re-look-up module effects directly).
+    let orig_indices: Vec<usize> = all_modules.iter().enumerate()
+        .filter(|(_, m)| core::DATA.mod_quality_tier(m.config_id)
+            .map(|t| config.quality_filter.allows(t))
+            .unwrap_or(true)) // unresolvable config_id => don't filter out
+        .map(|(i, _)| i)
+        .collect();
+    if orig_indices.is_empty() { return vec![]; }
+    let modules: Vec<&PlayerModule> = orig_indices.iter().map(|&i| &all_modules[i]).collect();
 
     let num_slots = config.num_modules.min(5);
 
@@ -216,11 +262,35 @@ pub fn optimize(modules: &[PlayerModule], config: &SolverConfig) -> Vec<ModCombo
 
         let module_indices: Vec<usize> = node.mods.iter()
             .filter(|&&m| m >= 0)
-            .map(|&m| m as usize)
+            .map(|&m| orig_indices[m as usize])
             .collect();
 
-        ModComboResult { module_indices, priority_stats, all_stats, score: node.score }
+        let ability_score = compute_ability_score(&all_stats);
+
+        ModComboResult { module_indices, priority_stats, all_stats, score: node.score, ability_score }
     }).collect()
+}
+
+/// ZDPS breakpoint snap: highest of [1,4,8,12,16,20] <= total, else 0.
+fn snap_to_breakpoint(total: u8) -> i32 {
+    const BPS: [i32; 6] = [1, 4, 8, 12, 16, 20];
+    let mut lvl = 0;
+    for &bp in &BPS {
+        if total as i32 >= bp { lvl = bp; } else { break; }
+    }
+    lvl
+}
+
+/// Mirrors ZDPS's `CalcCombosCombatScore`: sum of each stat's FightValue at its
+/// resolved breakpoint, plus the total-link-level bonus FightValue. Uses the
+/// slower per-effect data-table lookups — called once per *final* result only,
+/// never inside the beam-search hot loop.
+fn compute_ability_score(all_stats: &[(i32, u8)]) -> i32 {
+    let stat_score: i32 = all_stats.iter()
+        .map(|&(effect_id, total)| core::DATA.effect_fight_value(effect_id, snap_to_breakpoint(total)))
+        .sum();
+    let total_link_time: i32 = all_stats.iter().map(|&(_, v)| v as i32).sum();
+    stat_score + core::DATA.link_level_bonus_fight_value(total_link_time)
 }
 
 // ── Beam search ───────────────────────────────────────────────────────────────

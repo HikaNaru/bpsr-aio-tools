@@ -13,6 +13,11 @@ const NAME_COL_WIDTH:   f32 = 120.0;
 const CLASS_COL_WIDTH:  f32 = 110.0;
 const ROW_BG_ALPHA:     u8  = 77; // 0.3 opacity
 
+/// Displayed times are WIB (UTC+7), not raw UTC — storage stays `DateTime<Utc>`.
+fn to_wib(dt: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::FixedOffset> {
+    dt.with_timezone(&chrono::FixedOffset::east_opt(7 * 3600).unwrap())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortKey { Damage, DamageTaken, Healing, Hits, CritRate, Deaths }
 
@@ -34,6 +39,7 @@ pub struct EncounterHistoryModule {
     renaming:        Option<Uuid>,
     rename_buf:      String,
     confirm_clear:   Option<ClearScope>,
+    gear_panel_state: ui::widgets::gear_panel::GearPanelState,
 }
 
 impl EncounterHistoryModule {
@@ -53,6 +59,7 @@ impl EncounterHistoryModule {
             renaming:        None,
             rename_buf:      String::new(),
             confirm_clear:   None,
+            gear_panel_state: ui::widgets::gear_panel::GearPanelState::default(),
         }
     }
 
@@ -204,7 +211,7 @@ impl Module for EncounterHistoryModule {
             .show(ui, |ui| {
                 for (i, sum) in self.summaries.iter().enumerate() {
                     if i > 0 { ui.add_space(20.0); }
-                    let date = sum.started_at.format("%m/%d %H:%M").to_string();
+                    let date = to_wib(sum.started_at).format("%m/%d %H:%M").to_string();
                     let dur  = format_duration(sum.duration_secs);
                     let zone = if sum.scene_name.is_empty() { "Unknown Zone" } else { &sum.scene_name };
                     let display_name = sum.custom_name.as_deref().unwrap_or(zone);
@@ -404,7 +411,7 @@ impl EncounterHistoryModule {
             ui.label(
                 egui::RichText::new(format!(
                     "  {}  {}",
-                    enc.started_at.format("%Y-%m-%d %H:%M"),
+                    to_wib(enc.started_at).format("%Y-%m-%d %H:%M"),
                     format_duration(enc.duration_secs)
                 ))
                 .small()
@@ -566,11 +573,13 @@ impl EncounterHistoryModule {
                     });
                     ui.add_space(1.0);
 
-                    // Inline skill breakdown + gear/Imagines when selected
+                    // Inline skill breakdown + Imagines (left) and gear (right) when selected
                     if is_sel {
                         ui.horizontal(|ui| {
                             ui.add_space(24.0);
-                            ui.vertical(|ui| {
+                            ui.columns(2, |cols| {
+                                cols[0].label(egui::RichText::new("SKILL BREAKDOWN").small().strong().color(ui::theme::TEXT_MUTED));
+                                cols[0].add_space(4.0);
                                 let mut skills = if let Some(phase_idx) = self.selected_phase {
                                     p.phase_stats.iter().find(|s| s.phase_index == phase_idx)
                                         .map(|s| s.skills.clone()).unwrap_or_default()
@@ -581,9 +590,9 @@ impl EncounterHistoryModule {
                                 egui::Grid::new(format!("skills_{i}"))
                                     .num_columns(5)
                                     .striped(true)
-                                    .show(ui, |ui| {
+                                    .show(&mut cols[0], |ui| {
                                         for h in ["Skill","Damage","Hits","Crit%","MaxHit"] {
-                                            ui.label(egui::RichText::new(h).small().strong());
+                                            ui.label(egui::RichText::new(h).size(CELL_FONT_SIZE).strong());
                                         }
                                         ui.end_row();
                                         for sk in &skills {
@@ -591,32 +600,37 @@ impl EncounterHistoryModule {
                                             let skill_label = core::DATA.skill_name(sk.skill_id)
                                                 .map(|s| s.to_string())
                                                 .unwrap_or_else(|| format!("#{}", sk.skill_id));
-                                            ui.label(egui::RichText::new(&skill_label).small());
-                                            ui.label(egui::RichText::new(fmt_damage(sk.total_dmg)).small());
-                                            ui.label(egui::RichText::new(sk.hits.to_string()).small());
-                                            ui.label(egui::RichText::new(format!("{:.1}%", sk_crit)).small());
-                                            ui.label(egui::RichText::new(fmt_damage(sk.max_hit)).small());
+                                            ui.label(egui::RichText::new(&skill_label).size(CELL_FONT_SIZE));
+                                            ui.label(egui::RichText::new(fmt_damage(sk.total_dmg)).size(CELL_FONT_SIZE));
+                                            ui.label(egui::RichText::new(sk.hits.to_string()).size(CELL_FONT_SIZE));
+                                            ui.label(egui::RichText::new(format!("{:.1}%", sk_crit)).size(CELL_FONT_SIZE));
+                                            ui.label(egui::RichText::new(fmt_damage(sk.max_hit)).size(CELL_FONT_SIZE));
                                             ui.end_row();
                                         }
                                     });
 
+                                cols[0].add_space(8.0);
+                                cols[0].label(egui::RichText::new("IMAGINES").small().strong().color(ui::theme::TEXT_MUTED));
+                                cols[0].add_space(4.0);
+
+                                cols[1].label(egui::RichText::new("GEAR").small().strong().color(ui::theme::TEXT_MUTED));
+                                cols[1].add_space(4.0);
                                 if let Some(gear) = &p.gear {
-                                    ui.add_space(6.0);
-                                    ui.collapsing(egui::RichText::new("Gear & Imagines").small().strong(), |ui| {
-                                        if gear.gear.is_empty() && gear.imagines.is_empty() {
-                                            ui.label(egui::RichText::new("Not available").small().color(ui::theme::TEXT_FAINT));
-                                        }
-                                        for slot in &gear.gear {
-                                            let name = if slot.item_name.is_empty() { format!("Item #{}", slot.item_id) } else { slot.item_name.clone() };
-                                            ui.label(egui::RichText::new(format!("Slot {}: {}", slot.slot, name)).small());
-                                        }
-                                        for im in &gear.imagines {
-                                            let name = if im.name.is_empty() { format!("Skill #{}", im.skill_id) } else { im.name.clone() };
-                                            ui.label(egui::RichText::new(format!("Imagine: {} (Tier {})", name, im.tier)).small());
-                                        }
-                                    });
+                                    let slots: Vec<_> = gear.gear.iter().map(|s| ui::widgets::gear_panel::GearSlotView {
+                                        slot:      s.slot,
+                                        item_id:   s.item_id,
+                                        item_name: s.item_name.clone(),
+                                    }).collect();
+                                    let imagines: Vec<_> = gear.imagines.iter().map(|im| ui::widgets::gear_panel::ImagineView {
+                                        skill_id: im.skill_id,
+                                        tier:     im.tier,
+                                        name:     im.name.clone(),
+                                    }).collect();
+                                    ui::widgets::gear_panel::render_gear(&mut cols[1], &mut self.gear_panel_state, &slots);
+                                    ui::widgets::gear_panel::render_imagines(&mut cols[0], &mut self.gear_panel_state, &imagines);
                                 } else if p.is_player {
-                                    ui.label(egui::RichText::new("Gear: not available").small().color(ui::theme::TEXT_FAINT));
+                                    cols[1].label(egui::RichText::new("Not available").small().color(ui::theme::TEXT_FAINT));
+                                    cols[0].label(egui::RichText::new("Not available").small().color(ui::theme::TEXT_FAINT));
                                 }
                             });
                         });
