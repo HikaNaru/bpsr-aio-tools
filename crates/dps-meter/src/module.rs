@@ -742,9 +742,9 @@ impl Module for DpsMeterModule {
                                     };
                                     let bar_frac = (rank_total as f32 / max_rank_val as f32).min(1.0);
                                     let is_sel   = self.selected_player == Some(player.entity_id);
-                                    let class_id = self.classes.get(&player.entity_id).copied();
-                                    let stats    = self.stats_cache.get(&player.entity_id);
                                     let spec     = player_spec(player);
+                                    let class_id = self.classes.get(&player.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id));
+                                    let stats    = self.stats_cache.get(&player.entity_id);
                                     let is_player = self.is_player.get(&player.entity_id).copied().unwrap_or(false);
                                     let monster_type = self.monster_types.get(&player.entity_id).copied();
                                     let resp = player_row(ui, party_row_w, rank + 1, player, rank_value, rank_total, bar_frac, is_sel, class_id, stats, spec, is_player, monster_type);
@@ -778,8 +778,9 @@ impl Module for DpsMeterModule {
                         ui.label(egui::RichText::new("SKILL BREAKDOWN").strong().size(11.0).color(ui::theme::TEXT));
                         if let Some(sel_id) = self.selected_player {
                             if let Some(player) = players.iter().find(|p| p.entity_id == sel_id) {
-                                let class_id  = self.classes.get(&sel_id).copied();
-                                let spec_str  = player_spec(player).map(|s| format!(" · {s}")).unwrap_or_default();
+                                let spec      = player_spec(player);
+                                let class_id  = self.classes.get(&sel_id).copied().or_else(|| spec.and_then(spec_to_class_id));
+                                let spec_str  = spec.map(|s| format!(" · {s}")).unwrap_or_default();
                                 ui.label(
                                     egui::RichText::new(format!("{} · {}{}", player.player_name, class_name(class_id), spec_str))
                                         .size(11.0).color(ui::theme::ACCENT),
@@ -1287,11 +1288,12 @@ fn to_saved_player(
     }).collect();
 
     let phase_stats = bucket_player_phases(p, phases, total_elapsed);
+    let spec = player_spec(p);
 
     SavedPlayerMeter {
         entity_id:      p.entity_id.0,
         name:           p.player_name.clone(),
-        class_id:       classes.get(&p.entity_id).copied(),
+        class_id:       classes.get(&p.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id)),
         monster_type:   monster_types.get(&p.entity_id).copied(),
         total_damage:   p.total_damage(),
         hit_count:      p.hit_count(),
@@ -1304,7 +1306,7 @@ fn to_saved_player(
         crit_pct:       stats.and_then(|s| s.crit_pct),
         luck_pct:       stats.and_then(|s| s.luck_pct),
         crit_damage:    stats.and_then(|s| s.crit_damage),
-        spec:           player_spec(p).map(|s| s.to_string()),
+        spec:           spec.map(|s| s.to_string()),
         damage_lucky_hits:       p.damage_stats.lucky_hits,
         damage_crit_lucky_hits:  p.damage_stats.crit_lucky_hits,
         damage_crit_total:       p.damage_stats.crit_total,
@@ -1341,11 +1343,12 @@ fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>
         .filter(|p| is_player.get(&p.entity_id).copied().unwrap_or(false))
         .map(|p| {
             let stats    = stats_cache.get(&p.entity_id);
-            let class_id = classes.get(&p.entity_id).copied();
+            let spec     = player_spec(p);
+            let class_id = classes.get(&p.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id));
             core::discord::PlayerSummary {
                 name:            p.player_name.clone(),
                 class_name:      class_name(class_id),
-                spec:            player_spec(p).map(|s| s.to_string()),
+                spec:            spec.map(|s| s.to_string()),
                 total_damage:    p.total_damage(),
                 dps:             p.total_damage() as f64 / duration,
                 crit_pct:        p.crit_rate() * 100.0,
