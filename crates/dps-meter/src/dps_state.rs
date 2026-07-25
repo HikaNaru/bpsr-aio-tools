@@ -119,7 +119,7 @@ impl DpsState {
                 | DungeonStateKind::Vote => {
                     if let Some(enc) = &mut self.active {
                         if enc.outcome == EncounterOutcome::Unknown {
-                            enc.outcome = EncounterOutcome::Clear;
+                            enc.outcome = EncounterOutcome::Cleared;
                         }
                     }
                     self.finish_active();
@@ -135,7 +135,7 @@ impl DpsState {
                 self.post_settlement = false;
                 if let Some(enc) = &mut self.active {
                     if enc.outcome == EncounterOutcome::Unknown {
-                        enc.outcome = EncounterOutcome::Clear;
+                        enc.outcome = EncounterOutcome::Cleared;
                     }
                 }
                 self.finish_active();

@@ -232,7 +232,7 @@ impl Module for EncounterHistoryModule {
 
                     // Status diamond, colored by outcome
                     let outcome_color = match sum.outcome {
-                        EncounterOutcome::Clear      => ui::theme::GOOD,
+                        EncounterOutcome::Cleared      => ui::theme::GOOD,
                         EncounterOutcome::Failed     => ui::theme::BAD,
                         EncounterOutcome::ManualStop => ui::theme::ACCENT2,
                         EncounterOutcome::Unknown    => ui::theme::TEXT_FAINT,
@@ -250,7 +250,7 @@ impl Module for EncounterHistoryModule {
                     ));
 
                     let outcome_label = match sum.outcome {
-                        EncounterOutcome::Clear      => "Clear",
+                        EncounterOutcome::Cleared    => "Cleared",
                         EncounterOutcome::Failed     => "Failed",
                         EncounterOutcome::ManualStop => "Manual Stop",
                         EncounterOutcome::Unknown    => "Unknown",
@@ -396,13 +396,13 @@ impl EncounterHistoryModule {
             let title = enc.custom_name.as_deref().unwrap_or(zone);
             ui.strong(title);
             let outcome_label = match enc.outcome {
-                EncounterOutcome::Clear      => "Clear",
+                EncounterOutcome::Cleared    => "Cleared",
                 EncounterOutcome::Failed     => "Failed",
                 EncounterOutcome::ManualStop => "Manual Stop",
                 EncounterOutcome::Unknown    => "Unknown",
             };
             let outcome_color = match enc.outcome {
-                EncounterOutcome::Clear      => ui::theme::GOOD,
+                EncounterOutcome::Cleared    => ui::theme::GOOD,
                 EncounterOutcome::Failed     => ui::theme::BAD,
                 EncounterOutcome::ManualStop => ui::theme::ACCENT2,
                 EncounterOutcome::Unknown    => ui::theme::TEXT_FAINT,
