@@ -13,6 +13,12 @@ use std::time::Instant;
 #[allow(unused_imports)]
 use egui_plot;
 
+/// Grace period before re-saving a just-finished encounter to disk, so that
+/// gear/loadout attribute-sync packets arriving shortly after combat ends
+/// (not guaranteed to be tied to combat timing) still make it into the saved
+/// file. Heuristic, not a protocol guarantee.
+const GEAR_RESAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
 // ── Benchmark ─────────────────────────────────────────────────────────────────
 
 pub struct BenchmarkConfig {
@@ -70,6 +76,7 @@ pub struct DpsMeterModule {
     store:            EncounterStore,
     rank_mode:        u8,  // 0=DPS 1=Taken 2=Healing
     players_only:     bool,
+    pending_gear_resave: Vec<(Instant, Encounter)>,
 
     // Benchmark
     bench_config:    BenchmarkConfig,
@@ -107,6 +114,7 @@ impl DpsMeterModule {
             store:           EncounterStore::open(),
             rank_mode:       0,
             players_only:    false,
+            pending_gear_resave: Vec::new(),
             bench_config:    BenchmarkConfig::default(),
             bench_active:    false,
             bench_start:     None,
@@ -190,6 +198,20 @@ impl DpsMeterModule {
         }
     }
 
+    /// Zero-stat party preview shown before combat starts (e.g. right after
+    /// dungeon entry, once names/loadout/gear have arrived but no damage has
+    /// happened yet) — same row rendering as a live encounter, just frozen
+    /// at 0 instead of "No active encounter" until the first real hit.
+    fn preview_party_players(&self) -> Option<Vec<PlayerMeter>> {
+        let mut players: Vec<PlayerMeter> = self.is_player.iter()
+            .filter(|&(_, &is_p)| is_p)
+            .filter_map(|(id, _)| Some(PlayerMeter::new(*id, self.names.get(id)?.clone())))
+            .collect();
+        if players.is_empty() { return None; }
+        players.sort_by(|a, b| a.player_name.cmp(&b.player_name));
+        Some(players)
+    }
+
     fn save_encounter(&self, enc: &Encounter) {
         let saved = to_saved_encounter(
             enc, &self.classes, &self.monster_types, &self.stats_cache, &self.is_player, &self.gear_cache, &self.loadout_cache,
@@ -243,11 +265,17 @@ impl Module for DpsMeterModule {
                 GameEvent::EntityDespawn { id } => {
                     self.names.remove(id);
                     self.classes.remove(id);
-                    self.monster_types.remove(id);
                     self.is_player.remove(id);
                     self.stats_cache.remove(id);
                     self.dead_players.remove(id);
                     self.shield_seen.remove(id);
+                    // monster_types (like gear_cache/loadout_cache below) is deliberately NOT
+                    // cleared here: a monster's config/template id is only sent once, on the
+                    // initial appear/full-sync attrs — never resent on incremental deltas
+                    // (confirmed via capture). Clearing it on despawn permanently loses the
+                    // tier (Boss/Elite/Normal) for any monster that leaves AOI render range
+                    // and comes back (roaming mobs, or simply re-entering combat) — it can
+                    // never be re-resolved since the identity attr won't arrive again.
                     // gear_cache/loadout_cache are deliberately NOT cleared here: they're
                     // identity data (what someone is wearing), not live-presence data, and
                     // don't change just because the entity left AOI render range. Other
@@ -325,18 +353,22 @@ impl Module for DpsMeterModule {
                         self.target_progress.clear();
                         self.current_phase_target = None;
                         self.last_phase_id = None;
-                        // Gear/loadout are session-scoped identity data (see EntityDespawn
-                        // above for why they survive individual despawns) — reset at the
-                        // actual session/instance boundary instead.
+                        // Gear/loadout/monster-type are session-scoped identity data (see
+                        // EntityDespawn above for why they survive individual despawns) —
+                        // reset at the actual session/instance boundary instead.
                         self.gear_cache.clear();
                         self.loadout_cache.clear();
+                        self.monster_types.clear();
                     }
                 }
                 GameEvent::DungeonState { .. } => {
                     self.state.apply_state_event(&event);
                 }
                 GameEvent::DungeonPhaseSignal { targets, phase_id } => {
-                    if *phase_id != self.last_phase_id {
+                    // phase_id only ever comes from the full sync (0x17, enter/exit);
+                    // the mid-run dirty channel (0x18) never carries it, so `None` here
+                    // just means "this update didn't say" — not a real transition.
+                    if phase_id.is_some() && *phase_id != self.last_phase_id {
                         tracing::info!("dungeon phase_id changed: {:?} -> {:?} (unverified signal, logged for capture analysis)", self.last_phase_id, phase_id);
                         self.last_phase_id = *phase_id;
                     }
@@ -432,10 +464,27 @@ impl Module for DpsMeterModule {
             }
         }
 
+        // Re-save any recently finished encounters once their gear-resave grace
+        // period has elapsed, picking up gear/loadout attrs that arrived after
+        // the fight ended (see GEAR_RESAVE_DELAY). The duplicate-History-row
+        // bug this was suspected of causing was actually the End/Settlement/
+        // Vote phantom-encounter bug in dps_state.rs (fixed separately) —
+        // this reuses the same Encounter::id on resave, so it overwrites the
+        // same file rather than creating a new entry.
+        let now = Instant::now();
+        let mut due_resaves = Vec::new();
+        self.pending_gear_resave.retain(|(t, enc)| {
+            if *t <= now { due_resaves.push(enc.clone()); false } else { true }
+        });
+        for enc in &due_resaves {
+            self.save_encounter(enc);
+        }
+
         // Persist any newly finished encounters; fire discord if configured
         let finished: Vec<_> = self.state.newly_finished.drain(..).collect();
         for enc in &finished {
             self.save_encounter(enc);
+            self.pending_gear_resave.push((now + GEAR_RESAVE_DELAY, enc.clone()));
             let player_count = enc.players.keys()
                 .filter(|id| self.is_player.get(id).copied().unwrap_or(false))
                 .count();
@@ -451,14 +500,17 @@ impl Module for DpsMeterModule {
 
     fn ui(&mut self, ui: &mut egui::Ui, _egui_ctx: &egui::Context) {
         let enc_data = match self.selected_enc {
-            None    => self.state.active.as_ref(),
-            Some(i) => self.state.past.get(i),
-        }.map(|enc| {
-            let elapsed   = enc.elapsed().as_secs_f64();
-            let players: Vec<_> = enc.players_by_damage().into_iter().cloned().collect();
-            let total_dmg = enc.total_damage;
-            (elapsed, players, total_dmg)
-        });
+            None => self.state.active.as_ref().map(|enc| {
+                let elapsed   = enc.elapsed().as_secs_f64();
+                let players: Vec<_> = enc.players_by_damage().into_iter().cloned().collect();
+                (elapsed, players, enc.total_damage)
+            }).or_else(|| self.preview_party_players().map(|players| (0.0, players, 0u64))),
+            Some(i) => self.state.past.get(i).map(|enc| {
+                let elapsed   = enc.elapsed().as_secs_f64();
+                let players: Vec<_> = enc.players_by_damage().into_iter().cloned().collect();
+                (elapsed, players, enc.total_damage)
+            }),
+        };
 
         // ── Tab row ──────────────────────────────────────────────────────────
         ui.horizontal(|ui| {
@@ -506,6 +558,12 @@ impl Module for DpsMeterModule {
             self.render_bench(ui);
             return;
         }
+
+        // Captured before the content scroll area below — inside a scroll
+        // area's content ui, available_height() reports an unbounded
+        // "content" size (so it can grow past the viewport), not the actual
+        // window height, so this is the only point that gives a real number.
+        let content_avail_h = ui.available_height();
 
         match enc_data {
             None => {
@@ -603,6 +661,32 @@ impl Module for DpsMeterModule {
                 let left_w = if use_columns { available * 0.56 } else { available };
                 let right_w = if use_columns { available - left_w - 10.0 } else { available };
 
+                // Party list height: in two-column layout it stretches to fill
+                // the window (budget = height already available before this
+                // point, minus the chrome rendered above/around the list —
+                // header row, summary tiles, spacing, and the panel's own
+                // title/tabs/checkbox row, all fixed-size regardless of
+                // player count); in one-column layout it's the old fixed
+                // height plus one extra player row instead of a full rescale,
+                // since the list stacks above the skill panel rather than
+                // being the whole column.
+                const PARTY_ROW_H: f32 = 52.0;
+                const PARTY_LIST_CHROME_H: f32 = 235.0;
+                const PARTY_LIST_MIN_H: f32 = 160.0;
+                let party_list_h = if use_columns {
+                    (content_avail_h - PARTY_LIST_CHROME_H).max(PARTY_LIST_MIN_H)
+                } else {
+                    200.0 + PARTY_ROW_H
+                };
+                // Row content (rank/name/bar/numbers) needs a minimum width to
+                // stay readable — below that, scroll horizontally instead of
+                // squeezing everything together.
+                const PARTY_ROW_MIN_W: f32 = 320.0;
+                // panel_card's Frame adds 14px inner margin per side, which
+                // eats into left_w before rows actually render inside it.
+                const PANEL_CARD_MARGIN: f32 = 28.0;
+                let party_row_w = (left_w - PANEL_CARD_MARGIN).max(PARTY_ROW_MIN_W);
+
                 // ── Party Ranking panel (shared closure) ──────────────────────
                 let mut render_party_panel = |ui: &mut egui::Ui,
                                              new_sel: &mut Option<Option<EntityId>>| {
@@ -637,11 +721,12 @@ impl Module for DpsMeterModule {
                             2 => ranked.first().map(|p| p.total_healing()).unwrap_or(1).max(1),
                             _ => ranked.first().map(|p| p.total_damage()).unwrap_or(1).max(1),
                         };
-                        egui::ScrollArea::vertical()
+                        egui::ScrollArea::both()
                             .id_salt("party_scroll")
-                            .max_height(200.0)
+                            .max_height(party_list_h)
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                             .show(ui, |ui| {
+                                ui.set_min_width(party_row_w);
                                 ui.style_mut().interaction.selectable_labels = false;
                                 for (rank, player) in ranked.iter().enumerate() {
                                     let (rank_value, rank_total) = match self.rank_mode {
@@ -661,7 +746,8 @@ impl Module for DpsMeterModule {
                                     let stats    = self.stats_cache.get(&player.entity_id);
                                     let spec     = player_spec(player);
                                     let is_player = self.is_player.get(&player.entity_id).copied().unwrap_or(false);
-                                    let resp = player_row(ui, rank + 1, player, rank_value, rank_total, bar_frac, is_sel, class_id, stats, spec, is_player);
+                                    let monster_type = self.monster_types.get(&player.entity_id).copied();
+                                    let resp = player_row(ui, party_row_w, rank + 1, player, rank_value, rank_total, bar_frac, is_sel, class_id, stats, spec, is_player, monster_type);
                                     if resp.clicked() {
                                         *new_sel = Some(if is_sel { None } else { Some(player.entity_id) });
                                     }
@@ -1137,12 +1223,16 @@ fn bucket_player_phases(
 ) -> Vec<encounter_store::SavedPlayerPhaseStats> {
     if phases.is_empty() { return Vec::new(); }
 
-    let ranges: Vec<(f64, f64)> = phases.iter().enumerate()
-        .map(|(i, m)| {
-            let end = phases.get(i + 1).map(|n| n.start_offset_secs).unwrap_or(total_elapsed);
-            (m.start_offset_secs, end)
-        })
-        .collect();
+    // Bucket 0 is the implicit "Phase 1" — everything before the first
+    // recorded marker (markers only get pushed on a detected transition, so
+    // the run always starts in an unmarked phase). Recorded markers
+    // (phases[i]) become bucket i+1, matching push_phase's "Phase {len+2}"
+    // naming (len at push time == i, so name == i+2 == bucket index + 1).
+    let mut ranges: Vec<(f64, f64)> = vec![(0.0, phases[0].start_offset_secs)];
+    ranges.extend(phases.iter().enumerate().map(|(i, m)| {
+        let end = phases.get(i + 1).map(|n| n.start_offset_secs).unwrap_or(total_elapsed);
+        (m.start_offset_secs, end)
+    }));
 
     let mut buckets: Vec<encounter_store::SavedPlayerPhaseStats> = (0..ranges.len())
         .map(|i| encounter_store::SavedPlayerPhaseStats { phase_index: i, ..Default::default() })
@@ -1361,6 +1451,7 @@ fn panel_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 
 fn player_row(
     ui: &mut egui::Ui,
+    row_w: f32,
     rank: usize,
     player: &PlayerMeter,
     rank_value: f64,
@@ -1371,6 +1462,7 @@ fn player_row(
     stats: Option<&CharStats>,
     spec: Option<&'static str>,
     is_player: bool,
+    monster_type: Option<i32>,
 ) -> egui::Response {
     let bg = if selected {
         egui::Color32::from_rgba_premultiplied(91, 140, 255, 15)
@@ -1387,7 +1479,7 @@ fn player_row(
     let row_h = if gs_str.is_some() { 52.0 } else { 44.0 };
 
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), row_h),
+        egui::vec2(row_w, row_h),
         egui::Sense::click(),
     );
 
@@ -1429,9 +1521,9 @@ fn player_row(
             class_name(class_id).to_string()
         }
     } else {
-        "Monster".to_string()
+        monster_type_name(monster_type).to_string()
     };
-    let cls_color = if is_player { class_color_egui(class_id) } else { ui::theme::TEXT_MUTED };
+    let cls_color = if is_player { class_color_egui(class_id) } else { monster_type_color_egui(monster_type) };
     ui.painter().text(
         egui::pos2(name_x, cls_y),
         egui::Align2::LEFT_CENTER,

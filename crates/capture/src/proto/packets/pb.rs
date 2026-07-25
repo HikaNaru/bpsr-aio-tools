@@ -445,3 +445,22 @@ pub struct SyncDungeonData {
     #[prost(message, optional, tag = "1")]
     pub v_data: Option<DungeonSyncData>,
 }
+
+/// WorldNtf method 0x18 (SyncDungeonDirtyData) — the mid-run incremental
+/// counterpart to SyncDungeonData (0x17, which only fires at dungeon
+/// enter/exit). This outer envelope is normal protobuf; `buffer`'s bytes
+/// are the custom non-protobuf delta-diff blob format decoded in `blob.rs`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BufferStream {
+    #[prost(bytes = "vec", tag = "1")]
+    pub buffer: Vec<u8>,
+    /// EStreamType: 0 = StreamTypeDeltaDirtySafe (default), 1 = StreamTypeDeltaDirty, 2 = StreamTypeFullDirty.
+    #[prost(int32, tag = "2")]
+    pub stream_type: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SyncDungeonDirtyData {
+    #[prost(message, optional, tag = "1")]
+    pub v_data: Option<BufferStream>,
+}

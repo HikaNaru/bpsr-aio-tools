@@ -17,6 +17,7 @@ pub const METHOD_SYNC_CONTAINER_DATA:  u32 = 0x00000015;
 pub const METHOD_SYNC_NEAR_DELTA_INFO: u32 = 0x0000002D;
 pub const METHOD_SYNC_TO_ME_DELTA:     u32 = 0x0000002E;
 pub const METHOD_SYNC_DUNGEON_DATA:    u32 = 0x00000017;
+pub const METHOD_SYNC_DUNGEON_DIRTY_DATA: u32 = 0x00000018;
 
 // Social notification service (scene/zone data)
 pub const SOCIAL_NTF_SERVICE_UUID: u64 = 0x254C89A3;
@@ -69,6 +70,7 @@ pub fn dispatch(service_uuid: u64, method_id: u32, data: &[u8]) -> Vec<GameEvent
     }
 
     if service_uuid != SERVICE_UUID {
+        crate::proto::packets::unknown::log_unknown_service(service_uuid, method_id, data.len());
         return vec![];
     }
 
@@ -120,8 +122,14 @@ pub fn dispatch(service_uuid: u64, method_id: u32, data: &[u8]) -> Vec<GameEvent
                 Err(e) => { debug!("SyncDungeonData decode failed: {e}"); vec![] }
             }
         }
+        METHOD_SYNC_DUNGEON_DIRTY_DATA => {
+            match pb::SyncDungeonDirtyData::decode(data) {
+                Ok(msg) => parse_sync_dungeon_dirty_data(msg),
+                Err(e) => { debug!("SyncDungeonDirtyData decode failed: {e}"); vec![] }
+            }
+        }
         _ => {
-            crate::proto::packets::unknown::log_unknown(data);
+            crate::proto::packets::unknown::log_unknown(service_uuid, method_id, data);
             vec![]
         }
     }
@@ -1059,6 +1067,37 @@ fn parse_sync_dungeon_data(msg: pb::SyncDungeonData) -> Vec<GameEvent> {
         events.push(GameEvent::DungeonPhaseSignal { targets, phase_id });
     }
 
+    events
+}
+
+/// WorldNtf 0x18 — mid-run incremental dungeon state (see `packets::blob`
+/// for the custom non-protobuf delta format `v_data.buffer` decodes to).
+/// Unlike SyncDungeonData (0x17, enter/exit only), this fires throughout
+/// the run and is where DungeonTarget progress transitions actually show up.
+fn parse_sync_dungeon_dirty_data(msg: pb::SyncDungeonDirtyData) -> Vec<GameEvent> {
+    let Some(v_data) = msg.v_data else { return vec![] };
+    if v_data.buffer.is_empty() { return vec![]; }
+
+    let stream_safe = v_data.stream_type == 0; // EStreamType::StreamTypeDeltaDirtySafe
+    let dirty = crate::proto::packets::blob::DungeonDirtyData::parse(&v_data.buffer, stream_safe);
+    if dirty.state.is_some() || !dirty.targets.is_empty() {
+        debug!(
+            "SyncDungeonDirtyData state={:?} targets={:?}",
+            dirty.state,
+            dirty.targets.iter().map(|(k, d)| (*k, d.target_id, d.nums, d.complete)).collect::<Vec<_>>()
+        );
+    }
+
+    let mut events = Vec::new();
+    if let Some(state) = dirty.state {
+        events.push(GameEvent::DungeonState { state: DungeonStateKind::from_i32(state) });
+    }
+    if !dirty.targets.is_empty() {
+        let targets: Vec<DungeonTargetProgress> = dirty.targets.into_iter()
+            .map(|(_, d)| DungeonTargetProgress { target_id: d.target_id, nums: d.nums, complete: d.complete })
+            .collect();
+        events.push(GameEvent::DungeonPhaseSignal { targets, phase_id: None });
+    }
     events
 }
 

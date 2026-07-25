@@ -428,10 +428,17 @@ impl EncounterHistoryModule {
                 if ui.selectable_label(self.selected_phase.is_none(), "All").clicked() {
                     self.selected_phase = None;
                 }
+                // Index 0 is the implicit "Phase 1" — everything before the
+                // first recorded marker (see bucket_player_phases). Recorded
+                // markers (enc.phases[i]) are index i+1.
+                if ui.selectable_label(self.selected_phase == Some(0), "Phase 1").clicked() {
+                    self.selected_phase = Some(0);
+                }
                 for (i, phase) in enc.phases.iter().enumerate() {
-                    let label = if phase.name.is_empty() { format!("Phase {}", i + 1) } else { phase.name.clone() };
-                    if ui.selectable_label(self.selected_phase == Some(i), label).clicked() {
-                        self.selected_phase = Some(i);
+                    let idx = i + 1;
+                    let label = if phase.name.is_empty() { format!("Phase {}", idx + 1) } else { phase.name.clone() };
+                    if ui.selectable_label(self.selected_phase == Some(idx), label).clicked() {
+                        self.selected_phase = Some(idx);
                     }
                 }
             });
@@ -451,16 +458,21 @@ impl EncounterHistoryModule {
             total_healing: u64,
         }
 
+        // With a phase selected, drop monsters that had zero activity in it
+        // (e.g. trash mobs left over from an earlier phase) instead of
+        // showing an all-zero row — players stay listed either way since
+        // they're still relevant party context even if idle that phase.
         let rows: Vec<Row> = enc.players.iter()
             .filter(|p| !self.players_only || p.is_player)
-            .map(|p| {
+            .filter_map(|p| {
                 if let Some(phase_idx) = self.selected_phase {
-                    if let Some(ph) = p.phase_stats.iter().find(|s| s.phase_index == phase_idx) {
-                        return Row { p, total_damage: ph.total_damage, hits: ph.hits, damage_taken: ph.damage_taken, total_healing: ph.total_healing };
-                    }
-                    return Row { p, total_damage: 0, hits: 0, damage_taken: 0, total_healing: 0 };
+                    let ph = p.phase_stats.iter().find(|s| s.phase_index == phase_idx);
+                    let active = ph.is_some_and(|ph| ph.total_damage > 0 || ph.hits > 0 || ph.damage_taken > 0 || ph.total_healing > 0);
+                    if !active && !p.is_player { return None; }
+                    let ph = ph.cloned().unwrap_or_default();
+                    return Some(Row { p, total_damage: ph.total_damage, hits: ph.hits, damage_taken: ph.damage_taken, total_healing: ph.total_healing });
                 }
-                Row { p, total_damage: p.total_damage, hits: p.hit_count, damage_taken: p.damage_taken, total_healing: p.total_healing }
+                Some(Row { p, total_damage: p.total_damage, hits: p.hit_count, damage_taken: p.damage_taken, total_healing: p.total_healing })
             })
             .collect();
 
