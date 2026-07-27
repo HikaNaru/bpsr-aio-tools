@@ -6,9 +6,24 @@ use tracing::warn;
 
 pub fn data_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
-        let d = exe.parent().unwrap_or(exe.as_path()).join("data");
-        if d.exists() {
-            return d;
+        let exe_dir = exe.parent().unwrap_or(exe.as_path());
+
+        // Packaged/installed layout: data/ shipped next to the executable.
+        let next_to_exe = exe_dir.join("data");
+        if next_to_exe.exists() {
+            return next_to_exe;
+        }
+
+        // `cargo build` layout: exe sits in target/{debug,release}/, data/ is
+        // at the repo root two levels up — covers running the binary by
+        // absolute/relative path from anywhere (e.g. `/path/to/target/release/…`
+        // without `cd`-ing into the repo root first), not just the CWD-relative
+        // fallback below.
+        if let Some(repo_root) = exe_dir.parent().and_then(|p| p.parent()) {
+            let two_up = repo_root.join("data");
+            if two_up.exists() {
+                return two_up;
+            }
         }
     }
     PathBuf::from("data")
