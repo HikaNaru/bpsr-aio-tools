@@ -451,11 +451,21 @@ impl EncounterHistoryModule {
 
         // Per-row values, resolved either from the whole encounter or a single phase.
         struct Row<'a> {
-            p:            &'a SavedPlayerMeter,
-            total_damage: u64,
-            hits:         u64,
-            damage_taken: u64,
-            total_healing: u64,
+            p:                       &'a SavedPlayerMeter,
+            total_damage:            u64,
+            hits:                    u64,
+            damage_taken:            u64,
+            total_healing:           u64,
+            crit_count:              u64,
+            damage_lucky_hits:       u64,
+            damage_crit_total:       u64,
+            damage_lucky_total:      u64,
+            damage_crit_lucky_total: u64,
+            max_hit:                 u64,
+            heal_crit_total:         u64,
+            heal_lucky_total:        u64,
+            heal_crit_lucky_total:   u64,
+            heal_max_hit:            u64,
         }
 
         // With a phase selected, drop monsters that had zero activity in it
@@ -470,9 +480,23 @@ impl EncounterHistoryModule {
                     let active = ph.is_some_and(|ph| ph.total_damage > 0 || ph.hits > 0 || ph.damage_taken > 0 || ph.total_healing > 0);
                     if !active && !p.is_player { return None; }
                     let ph = ph.cloned().unwrap_or_default();
-                    return Some(Row { p, total_damage: ph.total_damage, hits: ph.hits, damage_taken: ph.damage_taken, total_healing: ph.total_healing });
+                    return Some(Row {
+                        p, total_damage: ph.total_damage, hits: ph.hits, damage_taken: ph.damage_taken, total_healing: ph.total_healing,
+                        crit_count: ph.crit_count, damage_lucky_hits: ph.damage_lucky_hits,
+                        damage_crit_total: ph.damage_crit_total, damage_lucky_total: ph.damage_lucky_total, damage_crit_lucky_total: ph.damage_crit_lucky_total,
+                        max_hit: ph.max_hit,
+                        heal_crit_total: ph.heal_crit_total, heal_lucky_total: ph.heal_lucky_total, heal_crit_lucky_total: ph.heal_crit_lucky_total,
+                        heal_max_hit: ph.heal_max_hit,
+                    });
                 }
-                Some(Row { p, total_damage: p.total_damage, hits: p.hit_count, damage_taken: p.damage_taken, total_healing: p.total_healing })
+                Some(Row {
+                    p, total_damage: p.total_damage, hits: p.hit_count, damage_taken: p.damage_taken, total_healing: p.total_healing,
+                    crit_count: p.crit_count, damage_lucky_hits: p.damage_lucky_hits,
+                    damage_crit_total: p.damage_crit_total, damage_lucky_total: p.damage_lucky_total, damage_crit_lucky_total: p.damage_crit_lucky_total,
+                    max_hit: p.max_hit,
+                    heal_crit_total: p.heal_crit_total, heal_lucky_total: p.heal_lucky_total, heal_crit_lucky_total: p.heal_crit_lucky_total,
+                    heal_max_hit: p.heal_max_hit,
+                })
             })
             .collect();
 
@@ -487,7 +511,7 @@ impl EncounterHistoryModule {
                 SortKey::DamageTaken => a.damage_taken.cmp(&b.damage_taken),
                 SortKey::Healing     => a.total_healing.cmp(&b.total_healing),
                 SortKey::Hits        => a.hits.cmp(&b.hits),
-                SortKey::CritRate    => a.p.crit_count.cmp(&b.p.crit_count),
+                SortKey::CritRate    => a.crit_count.cmp(&b.crit_count),
                 SortKey::Deaths      => a.p.deaths.cmp(&b.p.deaths),
             };
             if self.sort_desc { ord.reverse() } else { ord }
@@ -535,11 +559,11 @@ impl EncounterHistoryModule {
                     let p = row.p;
                     let dps      = row.total_damage as f64 / dps_div;
                     let heal_ps  = row.total_healing as f64 / dps_div;
-                    let crit_rt  = if row.hits > 0 { p.crit_count as f64 / row.hits as f64 * 100.0 } else { 0.0 };
-                    let lucky_rt = if row.hits > 0 { p.damage_lucky_hits as f64 / row.hits as f64 * 100.0 } else { 0.0 };
+                    let crit_rt  = if row.hits > 0 { row.crit_count as f64 / row.hits as f64 * 100.0 } else { 0.0 };
+                    let lucky_rt = if row.hits > 0 { row.damage_lucky_hits as f64 / row.hits as f64 * 100.0 } else { 0.0 };
                     let share    = row.total_damage as f64 / total as f64 * 100.0;
                     let taken_share = row.damage_taken as f64 / taken_total as f64 * 100.0;
-                    let effective_heal = p.total_healing.saturating_sub(p.overheal);
+                    let effective_heal = row.total_healing.saturating_sub(p.overheal);
                     let is_sel   = self.detail_player == Some(*i);
 
                     let row_color = entity_row_color(p);
@@ -565,19 +589,19 @@ impl EncounterHistoryModule {
                             fixed_cell(ui, 55.0, &row.hits.to_string(), CELL_FONT_SIZE);
                             fixed_cell(ui, 60.0, &format!("{:.1}%", crit_rt), CELL_FONT_SIZE);
                             fixed_cell(ui, 60.0, &format!("{:.1}%", lucky_rt), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.damage_crit_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.damage_lucky_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 100.0, &fmt_damage(p.damage_crit_lucky_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.max_hit), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.damage_crit_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.damage_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &fmt_damage(row.damage_crit_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.max_hit), CELL_FONT_SIZE);
                             fixed_cell(ui, 80.0, &fmt_damage(p.shield_gain), CELL_FONT_SIZE);
                             fixed_cell(ui, 100.0, &fmt_damage(row.total_healing), CELL_FONT_SIZE);
                             fixed_cell(ui, 75.0, &fmt_damage(heal_ps as u64), CELL_FONT_SIZE);
                             fixed_cell(ui, 90.0, &fmt_damage(effective_heal), CELL_FONT_SIZE);
                             fixed_cell(ui, 90.0, &fmt_damage(p.overheal), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_crit_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_lucky_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 100.0, &fmt_damage(p.heal_crit_lucky_total), CELL_FONT_SIZE);
-                            fixed_cell(ui, 90.0, &fmt_damage(p.heal_max_hit), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.heal_crit_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.heal_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 100.0, &fmt_damage(row.heal_crit_lucky_total), CELL_FONT_SIZE);
+                            fixed_cell(ui, 90.0, &fmt_damage(row.heal_max_hit), CELL_FONT_SIZE);
                             fixed_cell(ui, 90.0, &p.max_hp.map(|v| fmt_damage(v.max(0) as u64)).unwrap_or_else(|| "—".into()), CELL_FONT_SIZE);
                             fixed_cell(ui, 100.0, &format!("{} ({:.1}%)", fmt_damage(row.damage_taken), taken_share), CELL_FONT_SIZE);
                             fixed_cell(ui, 60.0, &p.deaths.to_string(), CELL_FONT_SIZE);

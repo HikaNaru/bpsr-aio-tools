@@ -1,6 +1,6 @@
 use crate::dps_state::DpsState;
 use crate::encounter::{Encounter, EncounterOutcome};
-use crate::meter::{PlayerMeter, SkillStat};
+use crate::meter::{CombatStats, PlayerMeter, SkillStat};
 use core::{
     module::{Module, ModuleContext},
     types::EntityId,
@@ -709,7 +709,11 @@ impl Module for DpsMeterModule {
                         ui.add_space(8.0);
                         // Sort by selected mode
                         let mut ranked: Vec<_> = players.iter()
-                            .filter(|p| !self.players_only || self.is_player.get(&p.entity_id).copied().unwrap_or(false))
+                            .filter(|p| {
+                                if !self.players_only { return true; }
+                                let class_id = self.classes.get(&p.entity_id).copied().or_else(|| player_spec(p).and_then(spec_to_class_id));
+                                resolve_is_player(self.is_player.get(&p.entity_id).copied().unwrap_or(false), class_id)
+                            })
                             .collect();
                         match self.rank_mode {
                             1 => ranked.sort_by(|a, b| b.damage_taken().cmp(&a.damage_taken())),
@@ -745,7 +749,7 @@ impl Module for DpsMeterModule {
                                     let spec     = player_spec(player);
                                     let class_id = self.classes.get(&player.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id));
                                     let stats    = self.stats_cache.get(&player.entity_id);
-                                    let is_player = self.is_player.get(&player.entity_id).copied().unwrap_or(false);
+                                    let is_player = resolve_is_player(self.is_player.get(&player.entity_id).copied().unwrap_or(false), class_id);
                                     let monster_type = self.monster_types.get(&player.entity_id).copied();
                                     let resp = player_row(ui, party_row_w, rank + 1, player, rank_value, rank_total, bar_frac, is_sel, class_id, stats, spec, is_player, monster_type);
                                     if resp.clicked() {
@@ -1239,6 +1243,8 @@ fn bucket_player_phases(
         .map(|i| encounter_store::SavedPlayerPhaseStats { phase_index: i, ..Default::default() })
         .collect();
     let mut skill_maps: Vec<HashMap<u32, SavedSkillStat>> = (0..ranges.len()).map(|_| HashMap::new()).collect();
+    let mut damage_stats: Vec<CombatStats> = (0..ranges.len()).map(|_| CombatStats::default()).collect();
+    let mut heal_stats: Vec<CombatStats> = (0..ranges.len()).map(|_| CombatStats::default()).collect();
 
     for hit in &p.hit_log {
         let Some(idx) = ranges.iter().position(|(s, e)| hit.time_secs >= *s && (hit.time_secs < *e || *e >= total_elapsed))
@@ -1248,6 +1254,7 @@ fn bucket_player_phases(
             crate::meter::HitKind::Damage => {
                 bucket.total_damage += hit.amount;
                 bucket.hits += 1;
+                damage_stats[idx].apply(hit.amount, hit.is_crit, hit.is_lucky);
                 let skill = skill_maps[idx].entry(hit.skill_id).or_insert_with(|| SavedSkillStat {
                     skill_id: hit.skill_id, total_dmg: 0, hits: 0, crits: 0, max_hit: 0,
                 });
@@ -1257,7 +1264,10 @@ fn bucket_player_phases(
                 if hit.amount > skill.max_hit { skill.max_hit = hit.amount; }
             }
             crate::meter::HitKind::Taken => bucket.damage_taken += hit.amount,
-            crate::meter::HitKind::Heal  => bucket.total_healing += hit.amount,
+            crate::meter::HitKind::Heal  => {
+                bucket.total_healing += hit.amount;
+                heal_stats[idx].apply(hit.amount, hit.is_crit, hit.is_lucky);
+            }
         }
     }
 
@@ -1265,6 +1275,25 @@ fn bucket_player_phases(
         let mut skills: Vec<_> = skill_maps[i].values().cloned().collect();
         skills.sort_by(|a, b| b.total_dmg.cmp(&a.total_dmg));
         bucket.skills = skills;
+
+        let d = &damage_stats[i];
+        bucket.crit_count              = d.crit_hits + d.crit_lucky_hits;
+        bucket.damage_lucky_hits       = d.lucky_hits;
+        bucket.damage_crit_lucky_hits  = d.crit_lucky_hits;
+        bucket.damage_crit_total       = d.crit_total;
+        bucket.damage_lucky_total      = d.lucky_total;
+        bucket.damage_crit_lucky_total = d.crit_lucky_total;
+        bucket.max_hit                 = d.max_hit;
+
+        let h = &heal_stats[i];
+        bucket.heal_hits              = h.hits;
+        bucket.heal_crit_hits         = h.crit_hits;
+        bucket.heal_lucky_hits        = h.lucky_hits;
+        bucket.heal_crit_lucky_hits   = h.crit_lucky_hits;
+        bucket.heal_crit_total        = h.crit_total;
+        bucket.heal_lucky_total       = h.lucky_total;
+        bucket.heal_crit_lucky_total  = h.crit_lucky_total;
+        bucket.heal_max_hit           = h.max_hit;
     }
     buckets
 }
@@ -1289,11 +1318,13 @@ fn to_saved_player(
 
     let phase_stats = bucket_player_phases(p, phases, total_elapsed);
     let spec = player_spec(p);
+    let class_id = classes.get(&p.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id));
+    let is_player = resolve_is_player(is_player, class_id);
 
     SavedPlayerMeter {
         entity_id:      p.entity_id.0,
         name:           p.player_name.clone(),
-        class_id:       classes.get(&p.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id)),
+        class_id,
         monster_type:   monster_types.get(&p.entity_id).copied(),
         total_damage:   p.total_damage(),
         hit_count:      p.hit_count(),
@@ -1340,12 +1371,12 @@ fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>
     let duration = enc.elapsed().as_secs_f64().max(1.0);
 
     let mut players: Vec<_> = enc.players.values()
-        .filter(|p| is_player.get(&p.entity_id).copied().unwrap_or(false))
-        .map(|p| {
-            let stats    = stats_cache.get(&p.entity_id);
+        .filter_map(|p| {
             let spec     = player_spec(p);
             let class_id = classes.get(&p.entity_id).copied().or_else(|| spec.and_then(spec_to_class_id));
-            core::discord::PlayerSummary {
+            if !resolve_is_player(is_player.get(&p.entity_id).copied().unwrap_or(false), class_id) { return None; }
+            let stats = stats_cache.get(&p.entity_id);
+            Some(core::discord::PlayerSummary {
                 name:            p.player_name.clone(),
                 class_name:      class_name(class_id),
                 spec:            spec.map(|s| s.to_string()),
@@ -1359,7 +1390,7 @@ fn to_discord_report(enc: &Encounter, stats_cache: &HashMap<EntityId, CharStats>
                 heal_ps:         p.total_healing() as f64 / duration,
                 ability_score:   stats.and_then(|s| s.ability_score),
                 season_strength: stats.and_then(|s| s.season_strength),
-            }
+            })
         })
         .collect();
     players.sort_by(|a, b| b.total_damage.cmp(&a.total_damage));
@@ -1652,6 +1683,14 @@ fn spec_to_class_id(spec: &str) -> Option<u32> {
         "Dissonance" | "Concerto" => Some(13),
         _ => None,
     }
+}
+
+/// True if confirmed via an EntityName packet, OR a class resolves from combat
+/// data (skill IDs unique to player specs) — the latter covers entities whose
+/// appear/attr packet was never captured (late join, out of AOI, subteam
+/// split, or the is_player flag was wiped on despawn and never resent).
+fn resolve_is_player(raw_is_player: bool, class_id: Option<u32>) -> bool {
+    raw_is_player || class_id.is_some()
 }
 
 fn player_spec(player: &PlayerMeter) -> Option<&'static str> {

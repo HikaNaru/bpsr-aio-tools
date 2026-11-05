@@ -51,6 +51,23 @@ pub struct SavedPlayerPhaseStats {
     pub damage_taken:  u64,
     pub total_healing: u64,
     pub skills:        Vec<SavedSkillStat>,
+    // ── Lucky / crit-lucky splits (damage), phase-scoped ────────────────────
+    #[serde(default)] pub crit_count:              u64,
+    #[serde(default)] pub damage_lucky_hits:       u64,
+    #[serde(default)] pub damage_crit_lucky_hits:  u64,
+    #[serde(default)] pub damage_crit_total:       u64,
+    #[serde(default)] pub damage_lucky_total:      u64,
+    #[serde(default)] pub damage_crit_lucky_total: u64,
+    #[serde(default)] pub max_hit:                 u64,
+    // ── Healing splits, phase-scoped ─────────────────────────────────────────
+    #[serde(default)] pub heal_hits:              u64,
+    #[serde(default)] pub heal_crit_hits:          u64,
+    #[serde(default)] pub heal_lucky_hits:         u64,
+    #[serde(default)] pub heal_crit_lucky_hits:    u64,
+    #[serde(default)] pub heal_crit_total:         u64,
+    #[serde(default)] pub heal_lucky_total:        u64,
+    #[serde(default)] pub heal_crit_lucky_total:   u64,
+    #[serde(default)] pub heal_max_hit:            u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
